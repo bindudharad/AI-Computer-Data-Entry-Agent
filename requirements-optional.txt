@@ -1,0 +1,7 @@
+# ATLAS AI - Optional dependencies
+# OCR fallback engines (only needed when the AI requests reading tiny printed text
+# and no VLM endpoint is configured).
+# Use ONE of the two:
+paddleocr>=2.7.0          # Heavier, higher accuracy on forms
+onnxruntime>=1.17.0       # Inference engine for PaddleOCR 3.x when paddlepaddle is absent
+# pytesseract>=0.3.10     # Lightweight alternative (requires Tesseract binary)
