@@ -23,11 +23,15 @@ _STATE_LABELS = {
     "idle": "IDLE",
     "waiting_attach": "WAITING FOR WINDOW",
     "attaching": "ATTACHING",
+    "inspecting_ui": "INSPECTING UI",
     "waiting_for_start_field": "CLICK THE FIRST FORM FIELD",
     "build_ui_tree": "BUILDING UI TREE",
+    "building_tree": "BUILDING TREE",
     "screen_model": "SCREEN MODEL",
-    "record_extraction": "EXTRACTING RECORD",
-    "field_mapping": "BUILDING UIA FIELD MAP",
+    "record_extraction": "READING RECORD",
+    "reading_record": "READING RECORD",
+    "field_mapping": "MAPPING FIELDS",
+    "mapping_fields": "MAPPING FIELDS",
     "watching": "WATCHING FOR RECORD",
     "observing": "OBSERVING",
     "understanding": "UNDERSTANDING",
@@ -39,6 +43,7 @@ _STATE_LABELS = {
     "scrolling": "SCROLLING",
     "uploading": "UPLOADING",
     "waiting": "WAITING FOR NEXT RECORD",
+    "waiting_next_record": "WAITING FOR NEXT RECORD",
     "verifying": "VERIFYING",
     "completed": "COMPLETED",
     "paused": "PAUSED",
@@ -124,7 +129,7 @@ class Dashboard:
                 if name.startswith(
                     ("state_var", "record_var", "field_var", "expected_var", "observed_var",
                      "confidence_var", "verify_var", "upload_var", "completed_var", "missing_var",
-                     "progress_var", "elapsed_var")
+                     "progress_var", "elapsed_var", "process_var", "controls_var", "mapped_var")
                 ) or name == "log":
                     try:
                         setattr(self, name, None)
@@ -141,6 +146,15 @@ class Dashboard:
         self.state_var = tk.StringVar(value="idle")
         state = tk.Label(root, textvariable=self.state_var, fg="#e6edf3", bg=bg, font=("Consolas", 11, "bold"), anchor="w")
         state.pack(fill="x", padx=10)
+
+        self.process_var = tk.StringVar(value="process: -")
+        tk.Label(root, textvariable=self.process_var, fg=fg, bg=bg, font=("Consolas", 9), anchor="w").pack(fill="x", padx=10)
+
+        self.controls_var = tk.StringVar(value="controls: -")
+        tk.Label(root, textvariable=self.controls_var, fg=fg, bg=bg, font=("Consolas", 9), anchor="w").pack(fill="x", padx=10)
+
+        self.mapped_var = tk.StringVar(value="mapped: -")
+        tk.Label(root, textvariable=self.mapped_var, fg=fg, bg=bg, font=("Consolas", 9), anchor="w").pack(fill="x", padx=10)
 
         self.record_var = tk.StringVar(value="record: -")
         tk.Label(root, textvariable=self.record_var, fg=fg, bg=bg, font=("Consolas", 10), anchor="w").pack(fill="x", padx=10)
@@ -217,9 +231,23 @@ class Dashboard:
             self._completed = 0
             self._failed = 0
             self._refresh_progress()
+        elif event.type == EventType.WINDOW_ATTACHED:
+            data = event.data or {}
+            title = data.get("title", "?")
+            pid = data.get("process_id", "?")
+            exe = (data.get("executable") or data.get("exe_path") or "?")
+            exe_name = exe.split("\\")[-1] if isinstance(exe, str) else "?"
+            self.process_var.set(f"process: {exe_name} (pid={pid})  {title}")
         elif event.type == EventType.STATE_CHANGED:
             state = event.data.get("state", "")
             self.state_var.set(f"state: {_STATE_LABELS.get(state, state)}")
+        elif event.type == EventType.FIELD_DISCOVERED:
+            count = (event.data or {}).get("count", 0)
+            self.controls_var.set(f"controls: {count} editable")
+        elif event.type == EventType.MAPPING:
+            data = event.data or {}
+            mappings = data.get("mappings") or []
+            self.mapped_var.set(f"mapped: {len(mappings)} fields")
         elif event.type == EventType.RECORD_STARTED:
             index = event.data.get("index", "?")
             key = (event.data.get("record") or {}).get("record_key", "")

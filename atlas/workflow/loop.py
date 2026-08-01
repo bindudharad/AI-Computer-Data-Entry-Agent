@@ -535,16 +535,43 @@ class AgentLoop:
 
     def _extract_record(self, scene: SceneDescription) -> SourceRecord | None:
         """Run the Record Extraction stage from UIA/OCR source pairs, falling
-        back to the VLM scene reader. On failure writes ``debug/no_record.json``.
+        back to the VLM scene reader. On failure writes ``debug/no_record.json``
+        and ``debug/record_failure.json`` (Step 6).
         """
         self._set(AgentState.RECORD_EXTRACTION)
         pairs = self._collect_source_pairs(scene)
         result = self._record_builder.build(pairs, title=scene.window_title)
         if result.record is None:
             self._report_no_record(scene, result)
+            self._write_record_failure(scene, result)
             return None
         self._bus.publish(EventType.SOURCE_READ, result.record.to_dict())
         return result.record
+
+    def _write_record_failure(self, scene: SceneDescription, result: RecordBuildResult) -> None:
+        """Write ``debug/record_failure.json`` with full diagnostics (Step 6)."""
+        if self._debug_dir is None:
+            return
+        payload = {
+            "reason": result.reason or "record could not be built",
+            "detected_labels": list(result.labels),
+            "detected_values": list(result.values),
+            "missing_required": list(result.missing_required),
+            "missing_controls": [],
+            "missing_mappings": [],
+            "window_title": scene.window_title,
+            "layout_summary": scene.layout_summary,
+        }
+        # Report missing controls/mappings from the field map if available.
+        if self._field_map is not None:
+            payload["missing_controls"] = [
+                n.name for n in (self._field_map.right_fields or [])
+                if n.control_type in {"Edit", "ComboBox", "CheckBox", "RadioButton"}
+            ]
+            payload["missing_mappings"] = [
+                m for m in (self._field_map.mappings or [])
+            ]
+        self._write_debug("record_failure.json", payload)
 
     @staticmethod
     def _clean_node_name(node: Any) -> str:

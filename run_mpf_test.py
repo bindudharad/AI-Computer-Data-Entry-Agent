@@ -92,12 +92,11 @@ def main() -> int:
         return 0
 
     print(f"ATLAS AI - MPF Data Entry")
-    print(f"Window: {args.title!r}")
     print(f"Max records: {args.records if args.records > 0 else 'unlimited'}")
     print(f"Dashboard: {'disabled' if args.no_dashboard else 'enabled'}")
     print("-" * 50)
-    print("NEXT: click the FIRST editable field in the MPF form's RIGHT panel")
-    print("      (a text box, dropdown or date field) to anchor the form.")
+    print("STEP 1: Click the MPF application window to attach")
+    print("STEP 2: Click the FIRST editable field in the form's RIGHT panel")
     print("Commands during execution:")
     print("  Ctrl+C  - Stop safely after current field")
     print("-" * 50)
@@ -106,10 +105,11 @@ def main() -> int:
     try:
         with Assistant(config) as assistant:
             try:
-                assistant.attach_desktop(title=args.title)
+                # Use click-to-attach (reliable for Electron/Chrome apps).
+                assistant.attach_desktop_by_click()
             except AttachError as exc:
                 print(f"\nERROR: {exc}", file=sys.stderr)
-                print(f"Open the MPF (Download and Upload Form) window first, then re-run.", file=sys.stderr)
+                print(f"Click inside the MPF application window and try again.", file=sys.stderr)
                 return 1
             dashboard.start()
 

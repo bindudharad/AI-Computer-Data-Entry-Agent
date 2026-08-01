@@ -8,6 +8,7 @@ verification (select-all + copy to read a field's current value).
 
 from __future__ import annotations
 
+import time
 import pyperclip
 
 from atlas.act.mouse import InputDriver
@@ -38,16 +39,12 @@ class ClipboardEngine:
         self.set_text(text)
         if self._driver is not None:
             self._driver.hotkey("ctrl", "v")
-        import time
-
         time.sleep(0.1)
 
     def read_focused(self) -> str:
         """Select-all + copy the focused control and return its value."""
         if self._driver is not None:
             self._driver.hotkey("ctrl", "a")
-            import time
-
             time.sleep(0.05)
             self._driver.hotkey("ctrl", "c")
             time.sleep(0.05)

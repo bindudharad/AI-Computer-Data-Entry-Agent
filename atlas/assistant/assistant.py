@@ -15,6 +15,8 @@ loop runs against either.
 from __future__ import annotations
 
 import json
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 from atlas.act.clipboard import ClipboardEngine
@@ -22,6 +24,7 @@ from atlas.act.controls import ControlEngine, ControlInterface
 from atlas.act.executor import ActionExecutor
 from atlas.act.keyboard import HumanKeyboard
 from atlas.act.mouse import HumanMouse, PyAutoGuiDriver
+from atlas.act.sandbox import ExecutionSandbox, SandboxConfig, TargetInfo
 from atlas.act.verify import ClipboardVerifier, CompositeVerifier, TargetFieldVerifier, VisionVerifier
 from atlas.config import AppConfig, load_config
 from atlas.core.events import EventType, get_event_bus
@@ -89,6 +92,7 @@ class Assistant:
         self._mouse = HumanMouse(self._driver, self._config.mouse)
         self._keyboard = HumanKeyboard(self._driver, self._config.typing)
         self._grabber = ScreenGrabber()
+        self._sandbox = ExecutionSandbox(SandboxConfig())
 
         advisor = LLMAdvisor(create_llm_provider(self._config.reasoning), self._config.reasoning.confidence_threshold)
         self._providers.append(advisor)
@@ -136,6 +140,28 @@ class Assistant:
         target = DesktopTarget(source, WindowAttacher(capture))
         target.attach(title)
         self._target = target
+        self._attach_sandbox()
+        self._build_executor(target)
+        self._bus.publish(EventType.WINDOW_ATTACHED, target.info.to_dict() if target.info else {})
+        logger.info("attached to desktop window '{}'", target.info.title if target.info else "")
+        return target
+
+    def attach_desktop_by_click(self, timeout: float = 120.0) -> TargetAdapter:
+        """Attach to a desktop window by waiting for the user to click it.
+
+        This is the reliable attachment method for Electron/Chrome-based apps
+        (like MPF) where title-based lookup finds ghost windows with pid=0.
+        The user clicks the real application window and we resolve it via
+        ``WindowFromPoint`` + ``GetAncestor``.
+        """
+        if self._target is not None:
+            self.detach()
+        capture = WindowCapture(grabber=self._grabber)
+        source = WindowSceneSource(capture, self._analyzer)
+        target = DesktopTarget(source, WindowAttacher(capture))
+        target.attach_by_click(timeout)
+        self._target = target
+        self._attach_sandbox()
         self._build_executor(target)
         self._bus.publish(EventType.WINDOW_ATTACHED, target.info.to_dict() if target.info else {})
         logger.info("attached to desktop window '{}'", target.info.title if target.info else "")
@@ -171,6 +197,7 @@ class Assistant:
                 logger.warning("detach failed: {}", exc)
             self._bus.publish(EventType.WINDOW_DETACHED)
             self._target = None
+        self._sandbox.detach()
 
     # -- run -----------------------------------------------------------------
 
@@ -283,29 +310,90 @@ class Assistant:
         out: Path,
         timeout: float,
     ) -> UiaNode:
-        """Wait for the user's click and resolve the StartControl anchor."""
+        """Wait for the user's click and resolve the StartControl anchor.
+
+        Uses both the low-level mouse hook AND foreground-window polling so the
+        agent never exits just because the hook thread died silently (common on
+        Electron/CEF apps). The first method to deliver a valid editable control wins.
+        """
         title = self._target.info.title if self._target.info else ""
+        handle = self._target.info.handle if self._target.info else None
         self._publish_state(AgentState.WAITING_FOR_START_FIELD)
         logger.info("waiting for you to click the first editable field in '{}'", title)
         logger.info("click a text/date/dropdown field in the RIGHT form panel to anchor the form")
 
-        click = listener.wait_for_click(timeout)
-        if click is None:
-            raise RuntimeError(
-                f"no click received within {timeout:.0f}s - click the first form field to begin"
-            )
-        x, y = click
         backend = UiaBackend.instance()
-        node = backend.element_at(x, y)
+        deadline = time.time() + timeout
+        poll = 0.1
+
+        while time.time() < deadline:
+            # Method 1: low-level mouse hook.
+            click = listener.wait_for_click(poll)
+            if click is not None:
+                x, y = click
+                try:
+                    node = backend.element_at(x, y)
+                    if self._is_valid_anchor(node, handle, out):
+                        return node
+                except Exception:
+                    pass
+
+            # Method 2: foreground-window polling. If the target window is now
+            # foreground, try to find the focused editable control.
+            if handle is not None:
+                try:
+                    import win32gui
+
+                    fg = win32gui.GetForegroundWindow()
+                    if fg == handle:
+                        focused = backend.focused()
+                        if self._is_valid_anchor(focused, handle, out):
+                            logger.info("detected focus in target window while waiting for click")
+                            return focused
+                except Exception:
+                    pass
+
+        raise RuntimeError(
+            f"no editable field selected within {timeout:.0f}s - click the first form field to begin"
+        )
+
+    def _is_valid_anchor(self, node: UiaNode | None, root_handle: int | None, out: Path) -> bool:
+        """Validate that a clicked control is a valid MPF form anchor.
+        
+        Uses UIA structure instead of pixel distance. Accepts clicks inside
+        editable controls that belong to the MPF form.
+        """
         if node is None or not node.editable:
-            node = backend.focused()
-        if node is None or not node.editable:
-            node = backend.element_at(x, y)
-            raise RuntimeError(
-                "the clicked control is not an editable field "
-                f"(name={getattr(node, 'name', '?')!r}, type={getattr(node, 'control_type', '?')!r}). "
-                "Click a text box, dropdown or date field, then re-run."
-            )
+            return False
+        
+        # Must be a form control type
+        valid_types = {"Edit", "ComboBox", "Calendar", "Spinner", "List", "ListItem"}
+        if node.control_type not in valid_types:
+            return False
+        
+        # Must belong to MPF root window
+        if root_handle is not None and node.handle is not None:
+            try:
+                import win32con
+                control_root = win32gui.GetAncestor(node.handle, win32con.GA_ROOT)
+                if control_root != root_handle:
+                    return False
+            except Exception:
+                pass
+        
+        # Accept: clicked inside an editable MPF control
+        logger.info(
+            "Anchor accepted: {} ({}) | Root: {} | Rect: {}",
+            node.name or node.automation_id,
+            node.control_type,
+            root_handle,
+            node.rect,
+        )
+        self._save_start_control(node, node.center[0] if node.center else 0, node.center[1] if node.center else 0, out)
+        return True
+
+    def _save_start_control(self, node: UiaNode, x: int, y: int, out: Path) -> UiaNode:
+        """Persist the start control and return it."""
         start = node.to_dict()
         start["clicked_at"] = {"x": x, "y": y}
         (out / "start_control.json").write_text(
@@ -330,10 +418,40 @@ class Assistant:
             json.dumps(backend.dump_tree(handle), ensure_ascii=False, indent=2, default=str),
             encoding="utf-8",
         )
+        # Step 2: write the full UIA diagnostic set to debug/uia/.
+        try:
+            backend.dump_diagnostics(handle, out / "uia")
+        except Exception as exc:
+            logger.debug("uia diagnostics dump failed: {}", exc)
         self._dump_panels(handle, field_map, out)
         if not field_map.has_form:
-            logger.warning("uia field map found no editable form fields - falling back to vision")
+            # Step 3: generate diagnostics instead of silently falling back.
+            logger.error(
+                "uia field map found no editable form fields - UI Automation exhausted. "
+                "Diagnostics written to %s/uia/. Check editable_controls.json.",
+                out,
+            )
+            self._write_field_map_failure(handle, field_map, out)
         return field_map
+
+    def _write_field_map_failure(self, handle: int, field_map: UiaFieldMap, out: Path) -> None:
+        """Write a diagnostic when the field map has no form fields (Step 3)."""
+        backend = UiaBackend.instance()
+        payload = {
+            "reason": "no editable form controls found via UI Automation",
+            "handle": handle,
+            "left_labels": len(field_map.left_labels),
+            "right_fields": len(field_map.right_fields),
+            "upload_button": bool(field_map.upload_button),
+            "inspectable_controls": len(backend.inspectable_nodes(handle)),
+            "diagnostics_dir": str(out / "uia"),
+        }
+        try:
+            (out / "field_map_failure.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+            )
+        except Exception as exc:
+            logger.debug("field_map_failure write failed: {}", exc)
 
     def _declared_fields(self) -> dict:
         path = Path("plugins/mpf/field_mapping.json")
@@ -379,6 +497,54 @@ class Assistant:
                 logger.info("loaded {} plugin file(s) from {}", loaded, self._config.plugins.directory)
         self._unsubscribe_plugins = self._bus.subscribe_all(self._plugins.event)
 
+    def _attach_sandbox(self) -> None:
+        """Attach the execution sandbox to the current target.
+
+        Uses the wrapper window handle (which is valid) as the sandbox owner.
+        For Electron/Chrome apps, PID may be 0 - this is acceptable.
+        """
+        if self._target is None or self._target.info is None:
+            return
+        info = self._target.info
+        root_handle = info.handle
+        root_pid = info.process_id
+        root_tid = info.thread_id
+        client_rect = (0, 0, 0, 0)
+
+        # Try to get PID from the window if it's 0.
+        if root_pid == 0 and root_handle:
+            try:
+                import win32process
+                _, root_pid = win32process.GetWindowThreadProcessId(root_handle)
+            except Exception:
+                pass
+
+        # Compute client rect from the wrapper window.
+        try:
+            import win32gui
+            rect = win32gui.GetClientRect(root_handle)
+            origin = win32gui.ClientToScreen(root_handle, (0, 0))
+            client_rect = (origin[0], origin[1], origin[0] + rect[2], origin[1] + rect[3])
+        except Exception:
+            pass
+
+        logger.info(
+            "sandbox attaching: handle=%s pid=%s class=%s",
+            root_handle, root_pid, info.class_name,
+        )
+
+        target_info = TargetInfo(
+            handle=root_handle,
+            pid=root_pid,
+            tid=root_tid,
+            class_name=info.class_name,
+            title=info.title,
+            exe_name=info.executable,
+            client_rect=client_rect,
+        )
+        self._sandbox.attach(target_info)
+        logger.info("sandbox attached to hwnd={} pid={}", root_handle, root_pid)
+
     def _build_executor(self, target: TargetAdapter) -> None:
         controls: ControlInterface = self._desktop_controls()
         verifier = self._desktop_verifier()
@@ -396,6 +562,7 @@ class Assistant:
             verify_after_action=self._config.workflow.verify_after_action,
             max_retries=self._config.workflow.max_retries_per_action,
             retry_delay=self._config.workflow.retry_delay,
+            sandbox=self._sandbox,
         )
 
     def _desktop_controls(self) -> ControlEngine:

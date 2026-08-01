@@ -21,9 +21,12 @@ class AgentState(str, Enum):
     INSPECTING_UI = "inspecting_ui"  # inspecting the real window's UIA tree (Step 2)
     WAITING_FOR_START_FIELD = "waiting_for_start_field"  # waiting for the user to click the first form field
     BUILD_UI_TREE = "build_ui_tree"  # enumerating the window's UIA tree + panels
+    BUILDING_TREE = "building_tree"  # alias for BUILD_UI_TREE (Step 8 dashboard state)
     SCREEN_MODEL = "screen_model"  # turning UI tree + panel crops into a screen model
     RECORD_EXTRACTION = "record_extraction"  # building a Record from the left panel
+    READING_RECORD = "reading_record"  # alias for RECORD_EXTRACTION (Step 8 dashboard state)
     FIELD_MAPPING = "field_mapping"  # building the UIA field map from the start control
+    MAPPING_FIELDS = "mapping_fields"  # alias for FIELD_MAPPING (Step 8 dashboard state)
     WATCHING = "watching"
     OBSERVING = "observing"  # actively observing the screen
     UNDERSTANDING = "understanding"  # parsing source record + fields
@@ -34,6 +37,7 @@ class AgentState(str, Enum):
     CLICKING = "clicking"
     SCROLLING = "scrolling"
     WAITING = "waiting"  # waiting for a new record
+    WAITING_NEXT_RECORD = "waiting_next_record"  # alias for WAITING (Step 8 dashboard state)
     VERIFYING = "verifying"
     UPLOADING = "uploading"  # submitting/uploading the current record
     COMPLETED = "completed"
@@ -52,9 +56,12 @@ _ACTIVE_STATES = {
     AgentState.INSPECTING_UI,
     AgentState.WAITING_FOR_START_FIELD,
     AgentState.BUILD_UI_TREE,
+    AgentState.BUILDING_TREE,
     AgentState.SCREEN_MODEL,
     AgentState.RECORD_EXTRACTION,
+    AgentState.READING_RECORD,
     AgentState.FIELD_MAPPING,
+    AgentState.MAPPING_FIELDS,
     AgentState.WATCHING,
     AgentState.OBSERVING,
     AgentState.UNDERSTANDING,
@@ -66,6 +73,7 @@ _ACTIVE_STATES = {
     AgentState.SCROLLING,
     AgentState.UPLOADING,
     AgentState.WAITING,
+    AgentState.WAITING_NEXT_RECORD,
     AgentState.VERIFYING,
     AgentState.RECOVERY,
 }
@@ -159,10 +167,31 @@ class StateMachine:
         self._resume_state = None
         self.force(AgentState.IDLE)
 
+    # Alias states are interchangeable with their base states for transitions.
+    _STATE_ALIASES: dict[AgentState, AgentState] = {
+        AgentState.BUILDING_TREE: AgentState.BUILD_UI_TREE,
+        AgentState.READING_RECORD: AgentState.RECORD_EXTRACTION,
+        AgentState.MAPPING_FIELDS: AgentState.FIELD_MAPPING,
+        AgentState.WAITING_NEXT_RECORD: AgentState.WAITING,
+    }
+    _ALIAS_TO_BASE: dict[AgentState, AgentState] = {}
+    for _alias, _base in _STATE_ALIASES.items():
+        _ALIAS_TO_BASE[_alias] = _base
+        _ALIAS_TO_BASE[_base] = _base
+    del _alias, _base
+
+    @staticmethod
+    def _normalize(state: AgentState) -> AgentState:
+        """Map alias states to their base state for transition checks."""
+        return StateMachine._ALIAS_TO_BASE.get(state, state)
+
     @staticmethod
     def _is_valid(current: AgentState, new_state: AgentState) -> bool:
         if new_state in _INTERRUPT_STATES:
             return True  # pause/stop always allowed
+        # Normalize alias states to their base for transition checks.
+        current = StateMachine._normalize(current)
+        new_state = StateMachine._normalize(new_state)
         if current == AgentState.IDLE:
             return new_state == AgentState.WAITING_ATTACH
         if current == AgentState.WAITING_ATTACH:

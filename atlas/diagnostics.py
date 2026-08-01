@@ -75,6 +75,15 @@ class Diagnostics:
 
         self._dump_ui_tree(handle, folder / "ui_tree.json", summary)
 
+        # Step 2: write the full UIA diagnostic set to debug/uia/.
+        try:
+            from atlas.observe.uia import UiaBackend
+
+            uia_summary = UiaBackend.instance().dump_diagnostics(handle, folder / "uia")
+            summary["uia"] = uia_summary
+        except Exception as exc:
+            summary["notes"].append(f"UIA diagnostics failed: {exc}")
+
         source = WindowSceneSource(capture, self._assistant._analyzer)  # noqa: SLF001
         analysis = source.observe()
         if analysis is None:

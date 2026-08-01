@@ -16,6 +16,7 @@ from atlas.act.controls import ControlInterface
 from atlas.act.keyboard import HumanKeyboard
 from atlas.act.models import VERIFYABLE_ACTIONS, Action, ActionResult, ActionType
 from atlas.act.mouse import HumanMouse
+from atlas.act.sandbox import ExecutionSandbox
 from atlas.act.verify import CompositeVerifier
 from atlas.core.logging import logger
 from atlas.core.metrics import Timer
@@ -43,6 +44,7 @@ class ActionExecutor:
         retry_delay: float = 0.8,
         scene_provider: SceneProvider | None = None,
         reobserve: Callable[[], SceneDescription | None] | None = None,
+        sandbox: ExecutionSandbox | None = None,
     ) -> None:
         self._mouse = mouse
         self._keyboard = keyboard
@@ -54,6 +56,7 @@ class ActionExecutor:
         self._retry_delay = retry_delay
         self._scene_provider = scene_provider
         self._reobserve = reobserve
+        self._sandbox = sandbox
 
     # -- public API ----------------------------------------------------------
 
@@ -91,6 +94,13 @@ class ActionExecutor:
     def _execute_with_recovery(self, action: Action) -> ActionResult:
         max_retries = action.max_retries if action.max_retries is not None else self._max_retries
         for attempt in range(max_retries + 1):
+            # Check sandbox before each attempt.
+            if self._sandbox is not None and self._sandbox.is_paused:
+                logger.warning("sandbox paused - waiting for resume")
+                self._sandbox.wait_until_resumed()
+            if not self._assert_sandbox(action):
+                result = ActionResult(action=action, success=False, message="sandbox blocked action")
+                return result
             result = self._do(action, attempt)
             if action.type not in VERIFYABLE_ACTIONS or not self._verify_after_action:
                 result.verified = True
@@ -159,6 +169,27 @@ class ActionExecutor:
                 element = scene.element(action.field_id)
                 if element is not None and element.bbox is not None:
                     action.bbox = element.bbox.shifted(*scene.screen_offset)
+
+    def _assert_sandbox(self, action: Action) -> bool:
+        """Validate action against sandbox rules. Returns False if blocked."""
+        if self._sandbox is None:
+            return True
+        # Keyboard actions require focus check.
+        if action.type in {ActionType.TYPE, ActionType.CLEAR, ActionType.PASTE, ActionType.TAB,
+                           ActionType.PRESS_ENTER, ActionType.PRESS_ESCAPE, ActionType.SUBMIT}:
+            ok, reason = self._sandbox.validate_keyboard()
+            if not ok:
+                logger.warning("sandbox blocked keyboard: {}", reason)
+                return False
+        # Mouse actions require click validation.
+        if action.type in {ActionType.CLICK, ActionType.DOUBLE_CLICK, ActionType.RIGHT_CLICK, ActionType.HOVER}:
+            if action.bbox is not None:
+                x, y = action.bbox.center
+                ok, reason = self._sandbox.validate_click(x, y)
+                if not ok:
+                    logger.warning("sandbox blocked click: {}", reason)
+                    return False
+        return True
 
     def _do(self, action: Action, attempt: int) -> ActionResult:
         try:

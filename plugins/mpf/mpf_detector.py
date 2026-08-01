@@ -53,14 +53,25 @@ class MpfDetector:
     # -- layout ---------------------------------------------------------------
 
     def refine(self, scene: SceneDescription) -> SceneDescription:
-        """Annotate every element with a section based on relative geometry."""
+        """Annotate every element with a section based on relative geometry.
+
+        Segments the window into:
+          * left data panel  (source)  - x < mid_x
+          * right editable form (form) - x >= mid_x
+          * bottom action area (actions) - upload/submit buttons by label
+        Never uses absolute coordinates - everything is relative to the
+        captured client area.
+        """
         boxed = [e for e in scene.elements if e.bbox is not None]
         if not boxed:
             return scene
         max_right = max(e.bbox.right for e in boxed)
+        max_bottom = max(e.bbox.bottom for e in boxed)
         if max_right <= 0:
             return scene
         mid_x = max_right // 2
+        # Bottom action band: lowest 20% of the window height.
+        action_band_top = max_bottom * 0.8 if max_bottom > 0 else 10**9
 
         for element in scene.elements:
             if element.bbox is None:
@@ -72,10 +83,14 @@ class MpfDetector:
                     element.type = ElementType.BUTTON
                 element.disabled = False
                 continue
+            # Bottom action area: buttons in the lowest band.
+            if element.type == ElementType.BUTTON and element.bbox.top >= action_band_top:
+                element.section = ACTION_SECTION
+                continue
             element.section = "source" if element.bbox.center[0] < mid_x else "form"
 
         self._correct_field_types(scene)
-        scene.layout_summary = "mpf(left=source,right=form)"
+        scene.layout_summary = "mpf(left=source,right=form,bottom=actions)"
         return scene
 
     def _correct_field_types(self, scene: SceneDescription) -> None:

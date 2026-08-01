@@ -37,9 +37,10 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     run = sub.add_parser("run", help="attach and run the loop")
-    target = run.add_mutually_exclusive_group(required=True)
+    target = run.add_mutually_exclusive_group(required=False)
     target.add_argument("--web", action="store_true", help="attach to a web page (Playwright)")
     target.add_argument("--title", metavar="TITLE", help="attach to a desktop window by title")
+    target.add_argument("--attach", action="store_true", help="click-to-attach: wait for the user to click the target window (reliable for Electron/Chrome apps)")
     run.add_argument("--url", default="http://localhost:5173", help="web URL (default http://localhost:5173)")
     run.add_argument("--browser", choices=["chromium", "firefox", "webkit"], default="chromium")
     run.add_argument("--headless", action="store_true", help="run the browser headless")
@@ -47,7 +48,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--no-overlay", action="store_true", help="disable the floating overlay")
     run.add_argument("--json", action="store_true", help="print the summary as JSON")
     run.add_argument("--anchor", action="store_true", help="desktop: wait for your click on the first form field, build a UIA field map, then run")
-    run.add_argument("--out", default="debug/auto", help="debug/session output directory (default debug/auto; with --anchor default debug/mpf)")
+    run.add_argument("--out", default="debug/mpf", help="debug/session output directory (default debug/mpf)")
 
     serve = sub.add_parser("serve", help="start the JSON command server")
     serve.add_argument("--port", type=int, default=0, help="port (default: CONTROLLER_COMMAND_PORT)")
@@ -78,19 +79,27 @@ def cmd_run(args: argparse.Namespace) -> int:
     with Assistant(config) as assistant:
         if args.web:
             assistant.attach_web(url=args.url, browser=args.browser, headless=args.headless)
-        else:
+        elif args.attach:
+            # Click-to-attach mode (Step 8): user clicks the target window,
+            # then clicks the first editable field, then autonomous entry.
+            print("ATTACH MODE: click the MPF application window to attach ...")
+            assistant.attach_desktop_by_click()
+        elif args.title:
             assistant.attach_desktop(title=args.title)
+        else:
+            # Default: click-to-attach (reliable for Electron/Chrome apps).
+            print("ATTACH MODE: click the MPF application window to attach ...")
+            assistant.attach_desktop_by_click()
         dashboard.start()
         print(f"attached: {assistant.target.info.to_dict()}")
-        if args.anchor:
-            if args.web:
-                print("--anchor is only valid for desktop targets; ignoring", file=sys.stderr)
-                summary = assistant.run(max_records=args.max_records, out_dir=args.out)
-            else:
-                print("waiting for you to click the first editable field in the form's RIGHT panel ...")
-                summary = assistant.run_anchored(max_records=args.max_records, out_dir=args.out)
-        else:
+        if args.web:
             summary = assistant.run(max_records=args.max_records, out_dir=args.out)
+        else:
+            # Desktop targets use the interactive anchored flow by default
+            # (Step 7): attach -> WAITING_FOR_START_FIELD -> user clicks the
+            # first editable field -> build field map -> autonomous entry.
+            print("waiting for you to click the first editable field in the form's RIGHT panel ...")
+            summary = assistant.run_anchored(max_records=args.max_records, out_dir=args.out)
         dashboard.stop()
         result = summary.to_dict()
         if args.json:

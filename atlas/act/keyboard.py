@@ -8,6 +8,7 @@ immediately corrected (configurable, off by default for data entry safety).
 from __future__ import annotations
 
 import random
+import time
 
 from atlas.act.mouse import InputDriver
 from atlas.config import TypingConfig
@@ -56,8 +57,6 @@ class HumanKeyboard:
             # occasional word-boundary pause
             if char == " " and random.random() < 0.3:
                 delay += random.uniform(0.05, 0.2)
-            import time
-
             time.sleep(delay)
         time.sleep(self._cfg.pause_after)
 
@@ -65,8 +64,6 @@ class HumanKeyboard:
         name = KEY_NAMES.get(str(key).lower(), str(key))
         for _ in range(presses):
             self._driver.press(name)
-            import time
-
             time.sleep(random.uniform(0.03, 0.09))
 
     def tab(self, times: int = 1) -> None:
@@ -96,8 +93,6 @@ class HumanKeyboard:
     def clear_field(self) -> None:
         """Select all and delete the current field content."""
         self.select_all()
-        import time
-
         time.sleep(random.uniform(0.03, 0.08))
         self.backspace()
         time.sleep(random.uniform(0.03, 0.08))
@@ -115,8 +110,6 @@ class HumanKeyboard:
             pos = random.randint(1, len(text) - 2)
             wrong = random.choice("abcdefghijklmnopqrstuvwxyz")
             self.type_text(text[:pos] + wrong)
-            import time
-
             time.sleep(random.uniform(0.1, 0.25))
             self.backspace()
             time.sleep(random.uniform(0.05, 0.15))

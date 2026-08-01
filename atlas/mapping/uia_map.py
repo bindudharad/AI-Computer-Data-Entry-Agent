@@ -144,15 +144,7 @@ class UiaFieldMapBuilder:
         mid_x = origin[0] + size[0] // 2
 
         editable = self._backend.editable_fields(hwnd)
-        if not editable:
-            # Recursive-traversal fallback: the flat walk may miss controls
-            # nested in Panes/Customs/Tables; walk the full tree explicitly.
-            recursive = getattr(self._backend, "inspectable_nodes", None)
-            if recursive is not None:
-                try:
-                    editable = [n for n in recursive(hwnd) if n.editable]
-                except Exception as exc:
-                    logger.debug("recursive editable traversal failed: {}", exc)
+        # editable_fields already does the recursive fallback internally.
         right_fields = [n for n in editable if n.rect is not None and n.rect.center[0] >= mid_x]
         if not right_fields:
             right_fields = editable

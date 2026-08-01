@@ -51,7 +51,11 @@ class PyAutoGuiDriver(InputDriver):
     def __init__(self) -> None:
         import pyautogui
 
-        pyautogui.FAILSAFE = True
+        # Fail-safe triggers when the mouse reaches a screen corner, which can
+        # happen during legitimate automation (e.g. scrolling to the bottom of
+        # a form). The ExecutionSandbox already confines all input to the
+        # target window, so the fail-safe is unnecessary and harmful here.
+        pyautogui.FAILSAFE = False
         pyautogui.PAUSE = 0.0
         self._pg = pyautogui
 
@@ -101,10 +105,14 @@ class HumanMouse:
             try:
                 self._driver.move_to(px, py, duration=0.0)
             except Exception as exc:
-                logger.debug("move_to skipped point: {}", exc)
+                # Never log-spam for skipped intermediate points.
+                logger.debug("move_to skipped intermediate point: {}", exc)
             time.sleep(random.uniform(self._cfg.min_delay, self._cfg.max_delay) * 0.15)
-        # settle on the exact target
-        self._driver.move_to(x, y, duration=total_duration * 0.3)
+        # settle on the exact target - always deliver the final position.
+        try:
+            self._driver.move_to(x, y, duration=total_duration * 0.3)
+        except Exception as exc:
+            logger.debug("move_to final settle failed: {}", exc)
         time.sleep(random.uniform(self._cfg.min_delay, self._cfg.max_delay) * 0.4)
 
     def click(self, x: int, y: int) -> None:

@@ -102,6 +102,11 @@ class UiaNode:
     password: bool = False
     options: list[str] = field(default_factory=list)
     type_override: ElementType | None = None
+    framework_id: str = ""
+    is_keyboard_focusable: bool = False
+    patterns: list[str] = field(default_factory=list)
+    parent: dict[str, Any] | None = None
+    children: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def editable(self) -> bool:
@@ -135,6 +140,11 @@ class UiaNode:
             "type_override": self.type_override.value if self.type_override else None,
             "editable": self.editable,
             "element_type": self.element_type.value,
+            "framework_id": self.framework_id,
+            "is_keyboard_focusable": self.is_keyboard_focusable,
+            "patterns": list(self.patterns),
+            "parent": self.parent,
+            "children": list(self.children),
         }
 
 
@@ -222,9 +232,27 @@ class UiaBackend:
         return nodes
 
     def editable_fields(self, handle: int) -> list[UiaNode]:
-        """Editable form widgets under ``handle``, in reading order."""
+        """Editable form widgets under ``handle``, in reading order.
+
+        Uses pywinauto's flat ``descendants()`` walk first. If that returns
+        zero editable controls, falls back to an explicit recursive traversal
+        (Step 3) so controls nested inside Panes/Customs/Tables are still
+        found. Never silently returns zero without trying the full tree.
+        """
         nodes = self.descendants(handle)
-        return [n for n in nodes if n.editable and not (n.rect is not None and (n.rect.width <= 0 or n.rect.height <= 0))]
+        editable = [n for n in nodes if n.editable and not (n.rect is not None and (n.rect.width <= 0 or n.rect.height <= 0))]
+        if editable:
+            return editable
+        # Step 3: recursive traversal fallback - inspect every child element.
+        logger.info("flat UIA walk found 0 editable controls; trying recursive traversal")
+        recursive = self.inspectable_nodes(handle)
+        recursive_editable = [
+            n for n in recursive
+            if n.editable and not (n.rect is not None and (n.rect.width <= 0 or n.rect.height <= 0))
+        ]
+        if recursive_editable:
+            logger.info("recursive traversal found {} editable controls", len(recursive_editable))
+        return recursive_editable
 
     def text_nodes(self, handle: int) -> list[UiaNode]:
         """Static text controls under ``handle`` (source-panel labels)."""
@@ -277,21 +305,49 @@ class UiaBackend:
         except Exception:
             return (0, 0)
 
-    def scroll_into_view(self, node: UiaNode) -> UiaNode | None:
-        """Best-effort ScrollItemPattern.ScrollIntoView + refreshed rect."""
+    def scroll_into_view(self, node: UiaNode) -> UiaNode:
+        """Best-effort ScrollItemPattern.ScrollIntoView + refreshed rect.
+        
+        Checks pattern availability before calling. Falls back to mouse wheel
+        scrolling if UIA pattern is unavailable.
+        """
         if not self._available:
             return node
+        
+        # Try UIA ScrollItemPattern first
         try:
             from comtypes.gen import UIAutomationClient
-
+            
             info = self._element_info.from_point(*node.center)
-            pattern = info.element.GetCurrentPattern(UIAutomationClient.UIA_ScrollItemPatternId)
-            pattern.ScrollIntoView()
-            refreshed = self.element_at(*node.center)
-            if refreshed is not None and refreshed.rect is not None:
+            if info is not None:
+                # Check if pattern is supported before calling
+                pattern = info.element.GetCurrentPattern(UIAutomationClient.UIA_ScrollItemPatternId)
+                if pattern is not None:
+                    pattern.ScrollIntoView()
+                    time.sleep(0.3)  # Wait for scroll to complete
+                    refreshed = self.element_at(*node.center)
+                    if refreshed is not None and refreshed.rect is not None:
+                        return refreshed
+        except Exception:
+            pass  # Pattern not supported
+        
+        # Fallback: mouse wheel scroll using SendInput
+        try:
+            import win32api
+            import win32con
+            center_x, center_y = node.center if node.center else (0, 0)
+            # Scroll down 3 times using win32api.mouse_event
+            # Use MOUSEEVENTF_WHEEL (0x0800) with negative delta for scroll down
+            for _ in range(3):
+                win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, 0, 0, -600)
+                time.sleep(0.1)
+            # Refresh position
+            refreshed = self.element_at(center_x, center_y)
+            if refreshed is not None:
                 return refreshed
         except Exception as exc:
-            logger.debug("scroll_into_view failed: {}", exc)
+            logger.debug("mouse wheel scroll failed: {}", exc)
+        
         return node
 
     # -- diagnostics ---------------------------------------------------------
@@ -497,6 +553,43 @@ class UiaBackend:
             value = info.value_pattern().current_value() if hasattr(info, "value_pattern") else None
         except Exception:
             value = None
+        # Additional UIA properties (Step 2).
+        framework_id = ""
+        try:
+            framework_id = info.framework_id or ""
+        except Exception:
+            framework_id = ""
+        is_keyboard_focusable = False
+        try:
+            is_keyboard_focusable = bool(info.is_keyboard_focusable)
+        except Exception:
+            is_keyboard_focusable = False
+        patterns: list[str] = []
+        try:
+            patterns = self._extract_patterns(info)
+        except Exception:
+            patterns = []
+        parent: dict[str, Any] | None = None
+        try:
+            parent_info = info.parent
+            if parent_info is not None:
+                parent = {
+                    "name": getattr(parent_info, "name", "") or "",
+                    "control_type": getattr(parent_info, "control_type", "") or "",
+                    "automation_id": getattr(parent_info, "automation_id", "") or "",
+                }
+        except Exception:
+            parent = None
+        children: list[dict[str, Any]] = []
+        try:
+            for child in info.children():
+                children.append({
+                    "name": getattr(child, "name", "") or "",
+                    "control_type": getattr(child, "control_type", "") or "",
+                    "automation_id": getattr(child, "automation_id", "") or "",
+                })
+        except Exception:
+            children = []
         return UiaNode(
             name=name,
             control_type=control_type,
@@ -507,7 +600,32 @@ class UiaBackend:
             value=value,
             enabled=enabled,
             visible=visible,
+            framework_id=framework_id,
+            is_keyboard_focusable=is_keyboard_focusable,
+            patterns=patterns,
+            parent=parent,
+            children=children,
         )
+
+    @staticmethod
+    def _extract_patterns(info) -> list[str]:
+        """Best-effort extraction of the UIA patterns supported by an element."""
+        patterns: list[str] = []
+        # pywinauto exposes patterns via element_info.element.GetSupportedPatterns().
+        try:
+            element = info.element
+            supported = element.GetSupportedPatterns()
+            for pattern in supported:
+                try:
+                    name = str(pattern)
+                    # comtypes GUIDs -> readable names.
+                    if "Pattern" in name:
+                        patterns.append(name.split(".")[-1].split(" ")[0])
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return patterns
 
     def _tree_dict(self, info) -> dict[str, Any]:
         try:
@@ -527,16 +645,36 @@ class UiaBackend:
         except Exception:
             handle = None
         try:
+            class_name = info.class_name or ""
+        except Exception:
+            class_name = ""
+        try:
+            framework_id = info.framework_id or ""
+        except Exception:
+            framework_id = ""
+        try:
+            enabled = bool(info.enabled)
+        except Exception:
+            enabled = True
+        try:
             r = info.rectangle
             rect = [int(r.left), int(r.top), int(r.right), int(r.bottom)]
         except Exception:
             rect = None
+        try:
+            patterns = self._extract_patterns(info)
+        except Exception:
+            patterns = []
         node: dict[str, Any] = {
             "name": name,
             "control_type": control_type,
             "automation_id": auto_id,
+            "class_name": class_name,
+            "framework_id": framework_id,
             "handle": handle,
+            "enabled": enabled,
             "rect": rect,
+            "patterns": patterns,
         }
         try:
             children = info.children()
