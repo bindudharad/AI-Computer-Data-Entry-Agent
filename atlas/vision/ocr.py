@@ -19,8 +19,9 @@ from typing import Any
 import numpy as np
 
 from atlas.config import OcrConfig
-from atlas.core.logging import logger
+from atlas.core.logging import logger, ocr_logger
 from atlas.vision.models import BBox, OcrText
+from atlas.vision.preprocess import preprocess as _preprocess
 
 
 class OcrReader(ABC):
@@ -40,10 +41,24 @@ class OcrReader(ABC):
         lines = self.read_image(crop)
         for line in lines:
             line.bbox = line.bbox.shifted(region.left, region.top)
+        ocr_logger.debug(
+            "ocr_region {}x{}@({},{}) -> {} line(s) [{}]",
+            region.width, region.height, region.left, region.top, len(lines), self.name,
+        )
         return lines
 
     def close(self) -> None:
         pass
+
+    def _maybe_preprocess(self, image: np.ndarray) -> np.ndarray:
+        """Apply OCR preprocessing unless the config disables it."""
+        if not getattr(self, "_preprocess", True):
+            return image
+        try:
+            return _preprocess(image)
+        except Exception as exc:
+            logger.debug("ocr preprocess skipped: {}", exc)
+            return image
 
 
 class PaddleOcrReader(OcrReader):
@@ -63,6 +78,7 @@ class PaddleOcrReader(OcrReader):
         self._engine: Any = None
         self._engine_failed: bool = False
         self._available: bool | None = None
+        self._preprocess: bool = self._config.preprocess
 
     def _ensure_engine(self) -> Any:
         if self._engine is not None:
@@ -125,9 +141,13 @@ class PaddleOcrReader(OcrReader):
         except Exception as exc:
             logger.debug("paddleocr unavailable: {}", exc)
             return []
-        if image.ndim == 2:
-            image = np.stack([image] * 3, axis=-1)
-        bgr = image[:, :, ::-1].copy()
+        try:
+            prepared = self._maybe_preprocess(image)
+        except Exception:
+            prepared = image
+        if prepared.ndim == 2:
+            prepared = np.stack([prepared] * 3, axis=-1)
+        bgr = prepared[:, :, ::-1].copy()
         result: Any = None
         try:
             result = engine.ocr(bgr, cls=True)
@@ -197,6 +217,7 @@ class TesseractOcrReader(OcrReader):
         self._config = config or OcrConfig()
         self._available: bool | None = None
         self._ensure_failed: bool = False
+        self._preprocess: bool = self._config.preprocess
 
     def _ensure(self) -> Any:
         try:
@@ -222,7 +243,8 @@ class TesseractOcrReader(OcrReader):
 
         try:
             pytesseract = self._ensure()
-            pil = Image.fromarray(image)
+            prepared = self._maybe_preprocess(image)
+            pil = Image.fromarray(prepared)
             data = pytesseract.image_to_data(pil, lang=self._config.lang, output_type="dict")
         except Exception as exc:  # noqa: BLE001 - backend-specific failures
             logger.debug("tesseract read failed: {}", exc)

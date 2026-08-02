@@ -297,7 +297,7 @@ def test_anchored_loop_three_records(tmp_path: Path) -> None:
 
 def test_anchored_loop_writes_debug_artifacts(tmp_path: Path) -> None:
     _run_anchored_records(tmp_path)
-    for name in ("planner.json", "execution.json", "verification.json"):
+    for name in ("planner.json", "execution_plan.json", "execution.json", "verification.json"):
         assert (tmp_path / name).exists(), f"missing {name}"
     # Per-record session artifacts, including the extracted record.
     for name in ("record.json", "timeline.json"):

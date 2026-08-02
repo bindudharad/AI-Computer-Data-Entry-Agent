@@ -18,7 +18,7 @@ from atlas.act.models import VERIFYABLE_ACTIONS, Action, ActionResult, ActionTyp
 from atlas.act.mouse import HumanMouse
 from atlas.act.sandbox import ExecutionSandbox
 from atlas.act.verify import CompositeVerifier
-from atlas.core.logging import logger
+from atlas.core.logging import action_logger, logger, verification_logger
 from atlas.core.metrics import Timer
 from atlas.reason.recovery import RecoveryDecision, RecoveryPlanner
 from atlas.vision.models import SceneDescription
@@ -45,6 +45,8 @@ class ActionExecutor:
         scene_provider: SceneProvider | None = None,
         reobserve: Callable[[], SceneDescription | None] | None = None,
         sandbox: ExecutionSandbox | None = None,
+        max_scroll_attempts: int = 6,
+        scroll_amount: int = 3,
     ) -> None:
         self._mouse = mouse
         self._keyboard = keyboard
@@ -57,6 +59,11 @@ class ActionExecutor:
         self._scene_provider = scene_provider
         self._reobserve = reobserve
         self._sandbox = sandbox
+        self._max_scroll_attempts = max_scroll_attempts
+        self._scroll_amount = scroll_amount
+
+    def set_reobserve(self, reobserve: Callable[[], SceneDescription | None]) -> None:
+        self._reobserve = reobserve
 
     # -- public API ----------------------------------------------------------
 
@@ -76,9 +83,19 @@ class ActionExecutor:
         from atlas.core.events import EventType, get_event_bus
 
         failed = not (result.ok or result.verified)
+        payload = result.to_dict()
         get_event_bus().publish(
             EventType.ACTION_FAILED if failed else EventType.ACTION_COMPLETED,
-            result.to_dict(),
+            payload,
+        )
+        action_logger.info(
+            "action {}{}: {} ({}) in {:.0f}ms | retries={}",
+            action.type.value,
+            " FAILED" if failed else "",
+            action.reason,
+            result.message or "ok",
+            timer.elapsed * 1000.0,
+            result.retries,
         )
         if failed:
             logger.warning(
@@ -92,6 +109,16 @@ class ActionExecutor:
     # -- internals -----------------------------------------------------------
 
     def _execute_with_recovery(self, action: Action) -> ActionResult:
+        # Uploads must never be re-clicked: a retry could double-submit the form.
+        # Execute once, then stop the record if it fails so the loop can move on.
+        if action.type == ActionType.SUBMIT:
+            if self._sandbox is not None and self._sandbox.is_paused:
+                self._sandbox.wait_until_resumed()
+            if not self._assert_sandbox(action):
+                return ActionResult(action=action, success=False, message="sandbox blocked submit")
+            self._scroll_into_view(action)
+            return self._do(action, 0)
+
         max_retries = action.max_retries if action.max_retries is not None else self._max_retries
         for attempt in range(max_retries + 1):
             # Check sandbox before each attempt.
@@ -101,6 +128,7 @@ class ActionExecutor:
             if not self._assert_sandbox(action):
                 result = ActionResult(action=action, success=False, message="sandbox blocked action")
                 return result
+            self._scroll_into_view(action)
             result = self._do(action, attempt)
             if action.type not in VERIFYABLE_ACTIONS or not self._verify_after_action:
                 result.verified = True
@@ -129,15 +157,25 @@ class ActionExecutor:
     def _publish_verification(self, action: Action, ok: bool, evidence: str, attempt: int) -> None:
         from atlas.core.events import EventType, get_event_bus
 
+        observed = self._observed_from_evidence(evidence)
         get_event_bus().publish(EventType.VERIFICATION, {
             "field_id": action.field_id,
             "label": action.reason,
             "expected": action.expected or action.value,
-            "observed": self._observed_from_evidence(evidence),
+            "observed": observed,
             "ok": ok,
             "attempt": attempt,
             "evidence": evidence,
         })
+        verification_logger.info(
+            "verify {} [{}] expected={!r} observed={!r} -> {} (attempt {})",
+            action.field_id or action.reason,
+            action.type.value,
+            action.expected or action.value,
+            observed,
+            "MATCH" if ok else "MISMATCH",
+            attempt,
+        )
 
     @staticmethod
     def _observed_from_evidence(evidence: str) -> str:
@@ -191,6 +229,69 @@ class ActionExecutor:
                     return False
         return True
 
+    def _scroll_into_view(self, action: Action) -> None:
+        """Bring an off-viewport field into view before acting on it.
+
+        When the action targets a bbox outside the target client rect (e.g. a
+        field below the fold), scroll toward it and re-observe to refresh the
+        bbox. The scroll strategy escalates when one method makes no progress:
+
+        - mouse wheel first (most natural),
+        - keyboard PageUp/PageDown when the wheel scrolls a parent pane but
+          not the nested region holding the field,
+        - scroll-bar jump (End/Home) as a last resort.
+
+        Bounded and never fatal: if it cannot be brought into view the action
+        is left as-is so sandbox validation still blocks it safely.
+        """
+        if action.bbox is None:
+            return
+        if self._sandbox is None:
+            return
+        target = self._sandbox.validate_target()
+        if target is None or not target.client_rect:
+            return
+        left, top, right, bottom = target.client_rect
+        strategies: list[str] = ["wheel", "keys", "scrollbar"]
+        previous_center: tuple[int, int] | None = None
+        for _ in range(self._max_scroll_attempts):
+            cx, cy = action.bbox.center
+            if left <= cx <= right and top <= cy <= bottom:
+                return
+            # Escalate when the last attempt moved nothing.
+            if previous_center == (cx, cy) and strategies:
+                strategies.pop(0)
+                if not strategies:
+                    return
+            previous_center = (cx, cy)
+
+            if cy < top:
+                direction = "up"
+            elif cy > bottom:
+                direction = "down"
+            elif cx < left:
+                direction = "up"
+            else:
+                direction = "down"
+
+            strategy = strategies[0]
+            if strategy == "keys":
+                self._controls.scroll_by_keys(direction, self._scroll_amount)
+            elif strategy == "scrollbar":
+                self._controls.scroll_bar(direction, self._scroll_amount)
+            else:
+                self._controls.scroll(direction, self._scroll_amount)
+
+            time.sleep(self._retry_delay)
+            if self._reobserve is None:
+                continue
+            scene = self._reobserve()
+            if scene is None or action.field_id is None:
+                continue
+            element = scene.element(action.field_id)
+            if element is not None and element.bbox is not None:
+                action.bbox = element.bbox.shifted(*scene.screen_offset)
+
     def _do(self, action: Action, attempt: int) -> ActionResult:
         try:
             return self._dispatch(action, attempt)
@@ -237,6 +338,12 @@ class ActionExecutor:
             self._controls.press_escape()
         elif action.type == ActionType.PASTE:
             self._controls.paste(value or "", action.field_id)
+        elif action.type == ActionType.UPLOAD_FILE:
+            if value is None:
+                return ActionResult(action=action, success=False, message="no file path for upload")
+            outcome = self._controls.upload_file(bbox, value, action.field_id)
+            if not outcome.ok:
+                return ActionResult(action=action, success=False, message=outcome.evidence)
         elif action.type == ActionType.WAIT:
             time.sleep(action.wait_seconds)
         elif action.type == ActionType.SUBMIT:

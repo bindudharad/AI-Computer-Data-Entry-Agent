@@ -151,6 +151,7 @@ TYPE_COMPATIBILITY: dict[ElementType, tuple[ElementType, ...]] = {
     ElementType.LISTBOX: (ElementType.LISTBOX, ElementType.COMBOBOX, ElementType.UNKNOWN),
     ElementType.CHECKBOX: (ElementType.CHECKBOX,),
     ElementType.RADIO: (ElementType.RADIO,),
+    ElementType.FILE_UPLOAD: (ElementType.FILE_UPLOAD, ElementType.TEXTBOX, ElementType.UNKNOWN),
     ElementType.DATE_PICKER: (ElementType.DATE_PICKER, ElementType.CALENDAR, ElementType.TEXTBOX, ElementType.UNKNOWN),
     ElementType.CALENDAR: (ElementType.CALENDAR, ElementType.DATE_PICKER, ElementType.TEXTBOX, ElementType.UNKNOWN),
 }

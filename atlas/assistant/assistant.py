@@ -285,13 +285,36 @@ class Assistant:
             field_map=field_map,
             ocr_callback=self._read_region_ocr,
             debug_dir=out,
+            capture_callback=self._capture_screenshot,
         )
         return self._loop.run()
+
+    def _capture_screenshot(self, path: str | Path) -> bool:
+        """Save the target's current client area to ``path``. Returns True on success."""
+        try:
+            from atlas.vision.capture import WindowCapture
+
+            info = self._target.info if self._target is not None else None
+            if info is None or info.handle is None:
+                return False
+            capture = WindowCapture(self._grabber)
+            capture.attach(info.handle, title=info.title)
+            try:
+                area = capture.capture_until_nonempty(timeout=3.0, poll=0.2)
+                if area is None:
+                    return False
+                area.save(path)
+                return True
+            finally:
+                capture.close()
+        except Exception as exc:
+            logger.debug("screenshot capture failed: {}", exc)
+            return False
 
     # -- anchored-flow internals ---------------------------------------------
 
     def _build_loop(self, max_records: int = 0, **kwargs: object) -> AgentLoop:
-        return AgentLoop(
+        loop = AgentLoop(
             target=self._target,
             source_reader=self._source_reader,
             mapper=self._mapper,
@@ -307,6 +330,9 @@ class Assistant:
             on_record=self._plugins.record,
             **kwargs,  # type: ignore[arg-type]
         )
+        if self._executor is not None:
+            self._executor.set_reobserve(loop.reobserve_scene)
+        return loop
 
     def _publish_state(self, state: AgentState) -> None:
         self._bus.publish(EventType.STATE_CHANGED, {"state": state.value})
@@ -449,8 +475,13 @@ class Assistant:
         builder = UiaFieldMapBuilder(backend=backend, declared_fields=declared)
         field_map = builder.build(handle, start_control)
         field_map.save(out / "field_map.json")
+        uia_tree = backend.dump_tree(handle)
         (out / "uia_tree.json").write_text(
-            json.dumps(backend.dump_tree(handle), ensure_ascii=False, indent=2, default=str),
+            json.dumps(uia_tree, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+        (out / "window_tree.json").write_text(
+            json.dumps(uia_tree, ensure_ascii=False, indent=2, default=str),
             encoding="utf-8",
         )
         # Step 2: write the full UIA diagnostic set to debug/uia/.
@@ -512,16 +543,37 @@ class Assistant:
                 logger.debug("panel dump {} failed: {}", name, exc)
 
     def stop(self) -> None:
+        self._release_inputs()
         if self._loop is not None:
             self._loop.stop()
 
     def pause(self) -> None:
+        self._release_inputs()
         if self._loop is not None:
             self._loop.pause()
 
     def resume(self) -> None:
         if self._loop is not None:
             self._loop.resume()
+
+    def _release_inputs(self) -> None:
+        """Release held mouse buttons / keyboard modifiers and clear locks.
+
+        Called on pause and safe stop so a mid-gesture interruption never leaves
+        a physical key or button pressed, and so the sandbox is not left paused.
+        """
+        try:
+            self._mouse.release()
+        except Exception:
+            pass
+        try:
+            self._keyboard.release()
+        except Exception:
+            pass
+        try:
+            self._sandbox.resume()
+        except Exception:
+            pass
 
     # -- internals -----------------------------------------------------------
 

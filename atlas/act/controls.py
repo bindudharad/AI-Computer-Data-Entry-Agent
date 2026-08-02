@@ -67,8 +67,28 @@ class ControlInterface(ABC):
     @abstractmethod
     def scroll(self, direction: str, amount: int = 3) -> ControlOutcome: ...
 
+    def scroll_by_keys(self, direction: str, amount: int = 3) -> ControlOutcome:
+        """Scroll via keyboard (PageUp/PageDown/Home/End).
+
+        Default implementation reports it is unsupported so the executor can
+        fall through to the scroll-bar strategy. Engines that can scroll a
+        focused container by keys override this.
+        """
+        return ControlOutcome(ok=False, evidence="keyboard scroll not supported")
+
+    def scroll_bar(self, direction: str, amount: int = 3) -> ControlOutcome:
+        """Scroll by dragging / clicking the window's scroll bar.
+
+        Default implementation reports it is unsupported so the executor can
+        give up cleanly. Engines that can reach a scroll bar override this.
+        """
+        return ControlOutcome(ok=False, evidence="scroll-bar scroll not supported")
+
     @abstractmethod
     def paste(self, value: str, field_id: str | None = None) -> ControlOutcome: ...
+
+    @abstractmethod
+    def upload_file(self, bbox: BBox | None, path: str, field_id: str | None = None) -> ControlOutcome: ...
 
 
 class ControlEngine(ControlInterface):
@@ -124,11 +144,13 @@ class ControlEngine(ControlInterface):
         if options:
             idx = self._find_option_index(options, value_str)
             if idx is not None:
+                # Let the dropdown animate open before arrow-navigating.
+                time.sleep(self._typing.dropdown_wait)
                 self._keyboard.press("down", idx + 1)
                 self._keyboard.enter()
                 return ControlOutcome(ok=True, evidence=f"arrow-selected #{idx}")
         self._keyboard.type_text(value_str)
-        time.sleep(0.2)
+        time.sleep(self._typing.dropdown_wait)
         self._keyboard.enter()
         return ControlOutcome(ok=True, evidence=f"typed option {value_str!r}")
 
@@ -146,6 +168,7 @@ class ControlEngine(ControlInterface):
         self._keyboard.clear_field()
         time.sleep(0.1)
         self._keyboard.type_text(date_str)
+        time.sleep(self._typing.dropdown_wait)
         self._keyboard.enter()
         return ControlOutcome(ok=True, evidence=f"typed date {date_str!r}")
 
@@ -165,9 +188,52 @@ class ControlEngine(ControlInterface):
         self._mouse.scroll(direction, amount)
         return ControlOutcome(ok=True, evidence=f"scrolled {direction} {amount}")
 
+    def scroll_by_keys(self, direction: str, amount: int = 3) -> ControlOutcome:
+        """Scroll a focused container with PageUp/PageDown keys.
+
+        Useful when the mouse wheel is over a region that does not capture the
+        wheel (nested scroll panes, web iframes). Pressing PageUp/PageDown
+        scrolls whatever control currently has focus.
+        """
+        key = "pagedown" if direction == "down" else "pageup"
+        presses = max(1, abs(amount))
+        self._keyboard.press(key, presses)
+        return ControlOutcome(ok=True, evidence=f"key-scrolled {direction} {presses}")
+
+    def scroll_bar(self, direction: str, amount: int = 3) -> ControlOutcome:
+        """Scroll by pressing End/Home keys toward the desired edge.
+
+        A true scroll-bar drag requires knowing the bar's geometry; End/Home
+        jump to the end of the active scroll region, which covers the same
+        goal for the common long-form case.
+        """
+        key = "end" if direction == "down" else "home"
+        self._keyboard.press(key)
+        return ControlOutcome(ok=True, evidence=f"scroll-bar jump {direction} ({key})")
+
     def paste(self, value: str, field_id: str | None = None) -> ControlOutcome:
         self._paste_value(value)
         return ControlOutcome(ok=True, evidence=f"pasted {len(value)} chars")
+
+    def upload_file(self, bbox: BBox | None, path: str, field_id: str | None = None) -> ControlOutcome:
+        """Fill a file-upload control.
+
+        Desktop file inputs (and their ``<input type=file>`` equivalents in
+        Chromium/Electron) accept a file path once focused. Click the control
+        then type the absolute path and confirm. Never raises.
+        """
+        if not path:
+            return ControlOutcome(ok=False, evidence="no file path for upload")
+        if bbox is not None:
+            x, y = bbox.center
+            self._mouse.click(x, y)
+            time.sleep(self._typing.dropdown_wait)
+        self._keyboard.clear_field()
+        time.sleep(0.1)
+        self._keyboard.type_text(path)
+        time.sleep(self._typing.dropdown_wait)
+        self._keyboard.enter()
+        return ControlOutcome(ok=True, evidence=f"uploaded file {path!r}")
 
     # -- internal helpers ----------------------------------------------------
 
@@ -212,9 +278,11 @@ class ControlEngine(ControlInterface):
         if m:
             a, b, year = int(m.group(1)), int(m.group(2)), m.group(3)
             if b > 12 and a <= 12:
-                day, month = a, b
+                # e.g. 03/21/1996 (MM/DD) -> day=21, month=03
+                day, month = b, a
             elif a > 12 and b <= 12:
-                month, day = b, a
+                # e.g. 21/03/1996 (DD/MM) -> day=21, month=03
+                day, month = a, b
             else:
                 day, month = a, b
             return f"{day:02d}/{month:02d}/{year}"

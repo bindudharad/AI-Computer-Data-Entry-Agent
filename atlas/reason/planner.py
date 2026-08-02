@@ -182,6 +182,34 @@ class ActionPlanner:
                         expected=value,
                         reason=f"verify '{mapping.source_label}'",
                     ))
+            elif field_type == ElementType.FILE_UPLOAD:
+                actions.append(Action(
+                    type=ActionType.CLICK,
+                    field_id=target.element_id,
+                    bbox=box,
+                    confidence=confidence,
+                    reason=f"focus file control '{mapping.source_label}'",
+                ))
+                if value:
+                    actions.append(Action(
+                        type=ActionType.UPLOAD_FILE,
+                        field_id=target.element_id,
+                        value=value,
+                        bbox=box,
+                        confidence=confidence,
+                        expected=value,
+                        reason=f"upload file for '{mapping.source_label}' = {value!r}",
+                    ))
+                if self._verify and value:
+                    actions.append(Action(
+                        type=ActionType.VERIFY,
+                        field_id=target.element_id,
+                        value=value,
+                        bbox=box,
+                        confidence=confidence,
+                        expected=value,
+                        reason=f"verify '{mapping.source_label}'",
+                    ))
             elif field_type in {ElementType.DATE_PICKER, ElementType.CALENDAR}:
                 actions.append(Action(
                     type=ActionType.CLICK,

@@ -28,7 +28,7 @@ from typing import Any
 from atlas.act.executor import ActionExecutor
 from atlas.act.models import ActionResult, ActionType
 from atlas.core.events import EventType, get_event_bus
-from atlas.core.logging import logger
+from atlas.core.logging import log_screenshot, logger
 from atlas.core.metrics import Timer
 from atlas.core.record_builder import RecordBuilder, RecordBuildResult
 from atlas.core.states import AgentState, StateMachine
@@ -154,6 +154,7 @@ class AgentLoop:
         session_dir: str | Path | None = None,
         state_budget: float | dict[str, float] | None = None,
         record_builder: RecordBuilder | None = None,
+        capture_callback: Callable[[Path], bool] | None = None,
     ) -> None:
         self._target = target
         self._source_reader = source_reader
@@ -173,6 +174,7 @@ class AgentLoop:
         self._debug_dir = Path(debug_dir) if debug_dir else None
         self._session_dir = Path(session_dir) if session_dir else (self._debug_dir / "session" if self._debug_dir else None)
         self._record_builder = record_builder or RecordBuilder()
+        self._capture_callback = capture_callback
         self._state_budget = self._normalize_budget(state_budget)
         self._states = StateMachine()
         self._stop = False
@@ -255,6 +257,7 @@ class AgentLoop:
             self._bus.publish(EventType.AGENT_STOPPED, {"reason": summary.stopped_reason})
             self._dump_timeline(summary)
             self._dump_failure(summary)
+            self._dump_focus_history()
         return summary
 
     # -- record processing ----------------------------------------------------
@@ -283,8 +286,13 @@ class AgentLoop:
             self._planner_status = f"{len(plan.actions)} actions planned"
 
         self._set(AgentState.THINKING)
+        key = record.record_key or ""
+        self._snapshot("before-fill", index, key)
         self._dump_record_debug(plan, [], index, record)
-        results = self._execute_plan(plan, submit_id)
+        results = self._execute_plan(plan, submit_id, index=index, record_key=key)
+        if not self._all_ok(results):
+            self._snapshot("failure", index, key)
+        self._snapshot("after-fill", index, key)
         self._dump_record_debug(plan, results, index, record)
         self._bus.publish(
             EventType.SCREEN_STATE,
@@ -323,7 +331,10 @@ class AgentLoop:
         )
         return result
 
-    def _execute_plan(self, plan: FillPlan, submit_element_id: str | None = None) -> list[ActionResult]:
+    def _execute_plan(
+        self, plan: FillPlan, submit_element_id: str | None = None,
+        index: int = 0, record_key: str = "",
+    ) -> list[ActionResult]:
         results: list[ActionResult] = []
         for action in plan.actions:
             if self._stop:
@@ -341,6 +352,7 @@ class AgentLoop:
             results.append(result)
             if result.ok and is_upload:
                 self._bus.publish(EventType.UPLOAD_COMPLETED, result.to_dict())
+                self._snapshot("after-upload", index, record_key)
             if not result.ok and action.type in {ActionType.SUBMIT, ActionType.CLICK}:
                 logger.warning("submit/click failed; stopping record: {}", result.message)
                 break
@@ -380,6 +392,7 @@ class AgentLoop:
             "ordered_labels": record.ordered_labels,
         })
         self._write_debug("planner.json", plan.to_dict())
+        self._write_debug("execution_plan.json", plan.to_dict())
         self._write_debug("execution.json", {
             "record_index": index,
             "actions": [r.to_dict() for r in results],
@@ -410,6 +423,29 @@ class AgentLoop:
         except Exception as exc:
             logger.debug("session write failed: {}", exc)
             return None
+
+    def _snapshot(self, context: str, index: int, key: str) -> Path | None:
+        """Capture a screenshot for the given record lifecycle point.
+
+        Writes ``debug/screenshots/{index}-{key}-{context}.png`` via the
+        target-agnostic capture callback. Never raises.
+        """
+        if self._capture_callback is None or self._debug_dir is None:
+            return None
+        folder = self._debug_dir / "screenshots"
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return None
+        safe_key = "".join(c if c.isalnum() or c in "-_" else "_" for c in (key or "record"))
+        path = folder / f"{index:04d}-{safe_key}-{context}.png"
+        try:
+            if self._capture_callback(path):
+                log_screenshot(path, context)
+                return path
+        except Exception as exc:
+            logger.debug("screenshot {} failed: {}", context, exc)
+        return None
 
     def _dump_timeline(self, summary: WorkflowSummary) -> None:
         if self._session_dir is None:
@@ -448,6 +484,28 @@ class AgentLoop:
         }
         self._write_debug("failure.json", payload)
 
+    def _dump_focus_history(self) -> None:
+        """Write ``focus_history.json`` from the RECOVERY event stream.
+
+        Every focus-related pause/refocus decision published by the sandbox or
+        the workflow is replayed here so focus-loss episodes are auditable
+        offline without re-running the automation.
+        """
+        if self._debug_dir is None:
+            return
+        try:
+            history = [
+                e.to_dict()
+                for e in self._bus.history(EventType.RECOVERY)
+                if "focus" in str(e.data.get("reason", "")).lower()
+            ]
+            self._write_debug("focus_history.json", {
+                "count": len(history),
+                "events": history,
+            })
+        except Exception as exc:
+            logger.debug("focus_history write failed: {}", exc)
+
     # -- helpers --------------------------------------------------------------
 
     def _await_record(self, previous_key: str | None) -> tuple[SceneAnalysis, SourceRecord] | None:
@@ -472,6 +530,10 @@ class AgentLoop:
                             self._bus.publish(EventType.NEXT_RECORD_DETECTED, {"key": record.record_key})
                             return analysis, record
                         if record is None:
+                            # A no-record (e.g. loading) screen must not be
+                            # cached by signature: force a fresh observation on
+                            # the next poll so the following record is detected.
+                            self._force_rebuild = True
                             time.sleep(self._next_poll)
                             continue
                         if self._same_record(record, previous_key):
@@ -486,6 +548,9 @@ class AgentLoop:
                     if record is not None and self._accept_record(record, previous_key, analysis.scene):
                         self._bus.publish(EventType.NEXT_RECORD_DETECTED, {"key": record.record_key})
                         return analysis, record
+                    if record is None:
+                        # Never let a no-record screen stay cached (see above).
+                        self._force_rebuild = True
                 time.sleep(self._next_poll)
         self._set(AgentState.STOPPED)
         return None
@@ -506,6 +571,20 @@ class AgentLoop:
         if key and key == previous_key:
             return True
         return bool(key is None and self._last_layout and record.record_key is None)
+
+    def reobserve_scene(self) -> SceneDescription | None:
+        """Force a fresh observation and return the (field-map-merged) scene.
+
+        Used by the executor after scrolling so bboxes stay accurate. Never
+        raises: returns None on observation failure.
+        """
+        try:
+            self._force_rebuild = True
+            analysis, _ = self._observe()
+            return analysis.scene if analysis is not None else None
+        except Exception as exc:
+            logger.debug("reobserve_scene failed: {}", exc)
+            return None
 
     def _observe(self) -> tuple[SceneAnalysis | None, bool]:
         """Observe the target and rebuild the screen model only when changed.
@@ -530,6 +609,14 @@ class AgentLoop:
             self._merge_field_map(analysis.scene)
             self._bus.publish(EventType.OBSERVED, analysis.to_dict())
             self._cached_analysis = analysis
+            self._write_debug("vision_output.json", {
+                "provider": analysis.scene.provider,
+                "window_title": analysis.scene.window_title,
+                "layout_summary": analysis.scene.layout_summary,
+                "screen_offset": list(analysis.scene.screen_offset),
+                "sections": [s.to_dict() for s in analysis.scene.sections],
+                "elements": [e.to_dict() for e in analysis.scene.elements],
+            })
             return analysis, True
         return self._cached_analysis, False
 
@@ -587,6 +674,10 @@ class AgentLoop:
                 except Exception as exc:
                     logger.debug("source OCR failed: {}", exc)
                     lines = []
+                self._write_debug("ocr_output.json", {
+                    "region": {"left": left.left, "top": left.top, "width": left.width, "height": left.height},
+                    "lines": [line.to_dict() for line in lines],
+                })
                 pairs = pair_source_pairs(lines, self._field_map.left_labels)
                 if pairs:
                     return pairs

@@ -36,6 +36,7 @@ class ElementType(str, Enum):
     SEARCH_BOX = "search_box"
     NAVIGATION = "navigation"
     SCROLLABLE = "scrollable"
+    FILE_UPLOAD = "file_upload"
     LABEL = "label"
     SECTION = "section"
     UNKNOWN = "unknown"
@@ -52,6 +53,7 @@ EDITABLE_TYPES = {
     ElementType.DATE_PICKER,
     ElementType.CALENDAR,
     ElementType.SEARCH_BOX,
+    ElementType.FILE_UPLOAD,
 }
 
 

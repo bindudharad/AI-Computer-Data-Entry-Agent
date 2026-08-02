@@ -44,6 +44,14 @@ class InputDriver(ABC):
     @abstractmethod
     def hotkey(self, *keys: str) -> None: ...
 
+    @abstractmethod
+    def release_all(self) -> None:
+        """Release any held mouse buttons / keyboard modifiers.
+
+        Called on emergency stop so no physical key or button stays pressed
+        after the agent is interrupted mid-gesture.
+        """
+
 
 class PyAutoGuiDriver(InputDriver):
     """pyautogui-based input driver."""
@@ -82,6 +90,18 @@ class PyAutoGuiDriver(InputDriver):
 
     def hotkey(self, *keys: str) -> None:
         self._pg.hotkey(*keys)
+
+    def release_all(self) -> None:
+        """Release held buttons/modifiers via pyautogui (best-effort)."""
+        try:
+            self._pg.mouseUp()
+        except Exception:
+            pass
+        for key in ("ctrl", "alt", "shift"):
+            try:
+                self._pg.keyUp(key)
+            except Exception:
+                pass
 
 
 class HumanMouse:
@@ -138,6 +158,13 @@ class HumanMouse:
 
     def hover(self, x: int, y: int) -> None:
         self.move_to(x, y)
+
+    def release(self) -> None:
+        """Release any held buttons on emergency stop."""
+        try:
+            self._driver.release_all()
+        except Exception as exc:
+            logger.debug("mouse release failed: {}", exc)
 
     def scroll(self, direction: str, amount: int = 3) -> None:
         if direction not in {"up", "down"}:

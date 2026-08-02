@@ -69,6 +69,9 @@ class RecordingControls(ControlInterface):
     def paste(self, value, field_id=None):
         self.typed.append(value)
         return ControlOutcome(ok=True)
+    def upload_file(self, bbox, path, field_id=None):
+        self.typed.append(path)
+        return ControlOutcome(ok=True)
 
 
 class StubMouse:
@@ -301,3 +304,50 @@ def test_mpf_field_mapping_json_loads() -> None:
     assert "Gender" in fields
     assert "Date Of Birth" in fields
     assert "Mobile Number" in fields
+
+
+def _loading_scene() -> SceneDescription:
+    """A post-upload 'please wait / loading' screen with no source data."""
+    return SceneDescription(
+        window_title="MPF (Download and Upload Form)",
+        layout_summary="loading screen",
+        elements=[
+            ScreenElement(element_id="lbl_loading", type=ElementType.LABEL,
+                          label="Please wait...", bbox=BBox(300, 150, 120, 20)),
+        ],
+    )
+
+
+def test_mpf_loop_waits_through_loading_screen() -> None:
+    """After an upload the loop must wait through a loading screen, then
+    continue with the next record - it must not crash or stall forever."""
+    scenes = [
+        _raw_mpf_scene("MPF-001", "KRISHNA", "Male", "21 March 1996"),
+        _loading_scene(),
+        _raw_mpf_scene("MPF-002", "RAVI KUMAR", "Female", "05 August 1990"),
+    ]
+    target = MpfFakeTarget(scenes)
+    controls = RecordingControls()
+    plugin = MpfPlugin()
+
+    executor = ActionExecutor(
+        mouse=StubMouse(), keyboard=StubKeyboard(), controls=controls,
+        verifier=PassVerifier(), recovery=RecoveryPlanner(),
+        verify_after_action=True, max_retries=3, retry_delay=0.0,
+    )
+    mapper = SemanticMapper()
+    for variant, canonical in plugin._config.get("aliases", {}).items():
+        mapper.aliases.learn(variant, canonical)
+
+    loop = AgentLoop(
+        target=target, source_reader=SourceReader(), mapper=mapper,
+        planner=ActionPlanner(verify_after_action=True), executor=executor,
+        max_records=2, next_record_timeout=3.0, next_record_poll=0.05,
+        scene_hook=plugin.refine_scene,
+    )
+    summary = loop.run()
+
+    assert summary.completed == 2
+    assert summary.failed == 0
+    assert len(summary.records) == 2
+    assert controls.typed == ["KRISHNA", "RAVI KUMAR"]

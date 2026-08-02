@@ -34,6 +34,7 @@ class RecordingControls(ControlInterface):
     def press_escape(self): return ControlOutcome(ok=True)
     def scroll(self, direction, amount=3): return ControlOutcome(ok=True)
     def paste(self, value, field_id=None): return ControlOutcome(ok=True)
+    def upload_file(self, bbox, path, field_id=None): return ControlOutcome(ok=True)
 
 
 class StubMouse:
@@ -191,3 +192,89 @@ def test_record_summary_contains_actions() -> None:
     assert ActionType.TYPE in types
     assert ActionType.TOGGLE in types
     assert types[-1] == ActionType.CLICK  # submit
+
+
+def test_loop_captures_before_and_after_fill_screenshots(tmp_path) -> None:
+    target = FakeTarget([make_scene("4001", "Ravi", "Yes")])
+    saved: list[str] = []
+
+    def capture(path) -> bool:
+        saved.append(str(path))
+        return True
+
+    executor = ActionExecutor(
+        mouse=StubMouse(), keyboard=StubKeyboard(), controls=RecordingControls(),
+        verifier=PassVerifier(), recovery=RecoveryPlanner(),
+        verify_after_action=True, max_retries=2, retry_delay=0.0,
+    )
+    loop = AgentLoop(
+        target=target, source_reader=SourceReader(), mapper=SemanticMapper(),
+        planner=ActionPlanner(verify_after_action=True), executor=executor,
+        max_records=1, next_record_timeout=0.3, next_record_poll=0.05,
+        debug_dir=tmp_path, capture_callback=capture,
+    )
+    summary = loop.run()
+    assert summary.completed == 1
+    assert len(saved) >= 2, saved
+    assert any(p.endswith("-before-fill.png") for p in saved)
+    assert any(p.endswith("-after-fill.png") for p in saved)
+    assert any(p.endswith("-after-upload.png") for p in saved)
+
+
+class _SequenceTarget(FakeTarget):
+    """Fake target whose observe() returns a fresh scene each call."""
+
+    def observe(self) -> SceneAnalysis | None:
+        if self._idx < len(self._scenes):
+            scene = self._scenes[self._idx]
+            self._idx += 1
+            return SceneAnalysis(scene=scene)
+        return None
+
+
+def test_reobserve_scene_refreshes_after_ui_change() -> None:
+    """Self-healing: reobserve_scene must return the NEW scene (window moved,
+    layout changed, fields re-added) rather than the cached one."""
+    from atlas.understanding.fields import EditableField
+    from atlas.vision.models import ScreenElement
+
+    initial = make_scene("5001", "Ravi", "Yes")
+    # The UI changes: the form field moves (as if the window/layout changed).
+    moved = SceneDescription(
+        window_title="Fake Window",
+        elements=[
+            ScreenElement(element_id="s0", type=ElementType.LABEL, label="Application No",
+                          value="5001", bbox=BBox(10, 10, 120, 16)),
+            ScreenElement(element_id="s1", type=ElementType.LABEL, label="Applicant Name",
+                          value="Ravi", bbox=BBox(10, 30, 120, 16)),
+            ScreenElement(element_id="s2", type=ElementType.LABEL, label="Agree",
+                          value="Yes", bbox=BBox(10, 50, 120, 16)),
+            ScreenElement(element_id="f0", type=ElementType.TEXTBOX, label="Applicant Name",
+                          bbox=BBox(200, 40, 120, 20)),
+            ScreenElement(element_id="f1", type=ElementType.CHECKBOX, label="Agree",
+                          bbox=BBox(200, 80, 20, 20)),
+            ScreenElement(element_id="b0", type=ElementType.BUTTON, label="Save",
+                          bbox=BBox(200, 120, 60, 24)),
+        ],
+        screen_offset=(500, 300),  # window moved on screen
+    )
+
+    target = _SequenceTarget([initial, moved])
+    executor = ActionExecutor(
+        mouse=StubMouse(), keyboard=StubKeyboard(), controls=RecordingControls(),
+        verifier=PassVerifier(), recovery=RecoveryPlanner(),
+        verify_after_action=True, max_retries=2, retry_delay=0.0,
+    )
+    loop = AgentLoop(
+        target=target, source_reader=SourceReader(), mapper=SemanticMapper(),
+        planner=ActionPlanner(verify_after_action=True), executor=executor,
+        max_records=0, next_record_timeout=0.3, next_record_poll=0.05,
+    )
+    # First observation caches the initial scene.
+    first = loop.reobserve_scene()
+    assert first is not None and first.screen_offset == (0, 0)
+    # A later re-observe (after a UI change) must see the moved window.
+    second = loop.reobserve_scene()
+    assert second is not None and second.screen_offset == (500, 300)
+    fields = [e for e in second.elements if e.element_id == "f0"]
+    assert fields and fields[0].bbox.x == 200

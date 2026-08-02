@@ -112,6 +112,7 @@ class OcrConfig:
     confidence_threshold: float = field(
         default_factory=_fclamp("OCR_CONFIDENCE_THRESHOLD", 0.4, 0.0, 1.0)
     )
+    preprocess: bool = field(default_factory=_fb("OCR_PREPROCESS", True))
 
 
 @dataclass(frozen=True)
@@ -139,6 +140,7 @@ class TypingConfig:
     clipboard_min_length: int = field(default_factory=_fi("TYPING_CLIPBOARD_MIN_LENGTH", 25))
     simulate_typos: bool = field(default_factory=_fb("TYPING_SIMULATE_TYPOS", False))
     typo_rate: float = field(default_factory=_fclamp("TYPING_TYPO_RATE", 0.02, 0.0, 1.0))
+    dropdown_wait: float = field(default_factory=_ff("DROPDOWN_ANIMATION_WAIT", 0.35))
 
 
 @dataclass(frozen=True)

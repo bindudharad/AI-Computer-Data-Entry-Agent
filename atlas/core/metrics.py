@@ -46,6 +46,9 @@ def timed(label: str, logger=None) -> Iterator[Timer]:
         timer.stop()
         if logger is not None:
             logger.debug("timed[{}] {:.3f}s", label, timer.elapsed)
+        from atlas.core.logging import timing_logger
+
+        timing_logger.debug("timed[{}] {:.3f}s", label, timer.elapsed)
 
 
 @dataclass

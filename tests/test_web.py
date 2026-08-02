@@ -50,6 +50,8 @@ PAGE_HTML = """<!doctype html>
       </select></div>
     <div><label for="f-agree">Agree</label>
       <input id="f-agree" name="agree" type="checkbox"></div>
+    <div><label for="f-file">Attachment</label>
+      <input id="f-file" name="attachment" type="file"></div>
     <button id="f-save" type="button">Save</button>
   </form>
 </body>
@@ -69,6 +71,7 @@ def _mock_scene() -> SceneDescription:
         ScreenElement(element_id="f1", type=ElementType.DATE_PICKER, label="Date of Birth"),
         ScreenElement(element_id="f2", type=ElementType.COMBOBOX, label="Gender", options=["Male", "Female"]),
         ScreenElement(element_id="f3", type=ElementType.CHECKBOX, label="Agree"),
+        ScreenElement(element_id="f4", type=ElementType.FILE_UPLOAD, label="Attachment"),
         ScreenElement(element_id="b0", type=ElementType.BUTTON, label="Save"),
     ]
     return SceneDescription(window_title="Atlas Web Test", elements=elements, confidence=1.0, provider="mock")
@@ -119,6 +122,11 @@ def test_dom_control_engine_fills_and_reads(tmp_path) -> None:
 
         assert controls.toggle(None, "Yes", "f3").ok
         assert target.read_field_value("f3") == "checked"
+
+        # File upload: create a temp file and attach it to the file input.
+        upload = tmp_path / "doc.txt"
+        upload.write_text("hello", encoding="utf-8")
+        assert controls.upload_file(None, str(upload), "f4").ok
     finally:
         target.close()
 

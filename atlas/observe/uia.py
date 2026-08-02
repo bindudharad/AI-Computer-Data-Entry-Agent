@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from atlas.core.logging import logger
+from atlas.core.logging import logger, uia_logger
 from atlas.vision.models import BBox, ElementType
 
 #: UIA control types that represent editable form widgets.
@@ -228,7 +228,7 @@ class UiaBackend:
                 continue
             if node is not None:
                 nodes.append(node)
-        nodes.sort(key=lambda n: (n.rect.top, n.rect.left) if n.rect else (10**9, 10**9))
+        uia_logger.debug("uia descendants({}) -> {} nodes", handle, len(nodes))
         return nodes
 
     def editable_fields(self, handle: int) -> list[UiaNode]:

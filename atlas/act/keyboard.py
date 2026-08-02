@@ -90,6 +90,15 @@ class HumanKeyboard:
     def undo(self) -> None:
         self._driver.hotkey("ctrl", "z")
 
+    def release(self) -> None:
+        """Release any held modifiers on emergency stop."""
+        try:
+            self._driver.release_all()
+        except Exception as exc:
+            from atlas.core.logging import logger
+
+            logger.debug("keyboard release failed: {}", exc)
+
     def clear_field(self) -> None:
         """Select all and delete the current field content."""
         self.select_all()

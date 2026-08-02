@@ -88,3 +88,34 @@ def test_field_order_top_to_bottom() -> None:
     b_index = next(i for i, a_ in enumerate(plan.actions) if a_.field_id == "b")
     a_index = next(i for i, a_ in enumerate(plan.actions) if a_.field_id == "a")
     assert b_index < a_index
+
+
+def test_file_upload_plan() -> None:
+    planner = ActionPlanner(verify_after_action=True)
+    record = SourceRecord(pairs={"Attachment": "C:/docs/x.pdf"}, ordered_labels=["Attachment"])
+    field = _field("f0", "Attachment", ElementType.FILE_UPLOAD, BBox(0, 0, 100, 20))
+    mapping = MappingResult(mappings=[
+        FieldMapping("Attachment", "C:/docs/x.pdf", field, 0.98, "exact"),
+    ])
+    plan = planner.plan_fill(record, mapping, _scene(), "b0")
+    types = [a.type for a in plan.actions]
+    assert types == [
+        ActionType.CLICK,
+        ActionType.UPLOAD_FILE,
+        ActionType.VERIFY,
+        ActionType.CLICK,  # submit
+    ]
+    assert plan.actions[0].field_id == "f0"
+    assert plan.actions[1].value == "C:/docs/x.pdf"
+    assert plan.actions[1].field_id == "f0"
+
+
+def test_file_upload_empty_value_skips_upload() -> None:
+    planner = ActionPlanner(verify_after_action=True)
+    record = SourceRecord(pairs={"Attachment": ""}, ordered_labels=["Attachment"])
+    field = _field("f0", "Attachment", ElementType.FILE_UPLOAD, BBox(0, 0, 100, 20))
+    mapping = MappingResult(mappings=[FieldMapping("Attachment", "", field, 0.98, "exact")])
+    plan = planner.plan_fill(record, mapping, _scene(), "b0")
+    types = [a.type for a in plan.actions]
+    # CLICK focus retained, but no UPLOAD_FILE/VERIFY for an empty path
+    assert types == [ActionType.CLICK, ActionType.CLICK]

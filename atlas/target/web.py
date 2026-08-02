@@ -228,12 +228,36 @@ class DomControlEngine(ControlInterface):
         self._page.mouse.wheel(0, delta)
         return ControlOutcome(ok=True, evidence=f"dom scroll {direction}")
 
+    def scroll_by_keys(self, direction: str, amount: int = 3) -> ControlOutcome:
+        # PageDown/PageUp scroll whatever region currently has focus - this is
+        # how nested scroll panes and iframes are reached in the browser.
+        key = "PageDown" if direction == "down" else "PageUp"
+        for _ in range(max(1, abs(amount))):
+            self._page.keyboard.press(key)
+        return ControlOutcome(ok=True, evidence=f"dom keys {direction}")
+
+    def scroll_bar(self, direction: str, amount: int = 3) -> ControlOutcome:
+        # End/Home jump to the end of the active scroll container.
+        key = "End" if direction == "down" else "Home"
+        self._page.keyboard.press(key)
+        return ControlOutcome(ok=True, evidence=f"dom scrollbar {direction}")
+
     def paste(self, value: str, field_id: str | None = None) -> ControlOutcome:
         loc = self._locator(field_id)
         if loc is None:
             return ControlOutcome(ok=False, evidence="no dom locator")
         loc.fill(value)
         return ControlOutcome(ok=True, evidence="dom paste")
+
+    def upload_file(self, bbox: BBox | None, path: str, field_id: str | None = None) -> ControlOutcome:
+        loc = self._locator(field_id)
+        if loc is None:
+            return ControlOutcome(ok=False, evidence="no dom locator")
+        try:
+            loc.set_input_files(path)
+            return ControlOutcome(ok=True, evidence=f"dom file upload {path!r}")
+        except Exception as exc:
+            return ControlOutcome(ok=False, evidence=f"dom upload failed: {exc}")
 
 
 def _parse_boolean(value: str) -> bool:

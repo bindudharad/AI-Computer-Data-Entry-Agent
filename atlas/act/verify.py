@@ -51,6 +51,24 @@ def normalize_for_compare(value: str) -> str:
     return re.sub(r"[\s_\-]+", " ", lowered).strip()
 
 
+def _file_match(actual: str, expected: str) -> bool:
+    """Match file-upload read-backs against an expected path.
+
+    Browsers expose file inputs as ``C:\\fakepath\\<basename>`` (and the
+    separator can vary), so compare the basenames case-insensitively and also
+    accept the expected path appearing anywhere in the read-back.
+    """
+    if not actual or not expected:
+        return False
+    expected_lower = expected.lower().replace("\\", "/")
+    actual_lower = actual.lower().replace("\\", "/")
+    if expected_lower in actual_lower:
+        return True
+    expected_base = expected_lower.rsplit("/", 1)[-1]
+    actual_base = actual_lower.rsplit("/", 1)[-1]
+    return bool(expected_base) and expected_base == actual_base
+
+
 class TargetFieldVerifier(FieldVerifier):
     """Delegates verification to the target adapter (e.g. DOM value read)."""
 
@@ -75,6 +93,8 @@ class TargetFieldVerifier(FieldVerifier):
             return True, f"target read-back matched ({actual!r})"
         if e and e in a:
             return True, f"target read-back contains expected ({actual!r})"
+        if _file_match(actual, expected):
+            return True, f"target read-back file matched ({actual!r})"
         return False, f"target read-back mismatch: got {actual!r}, expected {expected!r}"
 
 
@@ -165,4 +185,4 @@ class CompositeVerifier:
         return False, " | ".join(failures)
 
 
-__all__ = ["FieldVerifier", "CompositeVerifier", "ClipboardVerifier", "VisionVerifier", "TargetFieldVerifier", "normalize_for_compare"]
+__all__ = ["FieldVerifier", "CompositeVerifier", "ClipboardVerifier", "VisionVerifier", "TargetFieldVerifier", "normalize_for_compare", "_file_match"]

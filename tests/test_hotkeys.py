@@ -65,17 +65,19 @@ def test_start_registers_four_hotkeys(fake_win32) -> None:
 def test_hotkey_dispatch_invokes_callback(fake_win32) -> None:
     mgr = HotkeyManager()
     calls: list[str] = []
-    mgr.register("stop", lambda: calls.append("stop"))
     mgr.register("pause", lambda: calls.append("pause"))
+    mgr.register("stop", lambda: calls.append("stop"))
+    mgr.register("resume", lambda: calls.append("resume"))
     mgr.start()
     try:
         time.sleep(0.2)
-        fake_win32.feed(1)  # ESC -> stop
-        fake_win32.feed(2)  # Ctrl+Shift+S -> pause
+        fake_win32.feed(1)  # ESC -> pause
+        fake_win32.feed(2)  # Ctrl+Shift+S -> safe stop
+        fake_win32.feed(3)  # Ctrl+Shift+R -> resume
         time.sleep(0.4)
     finally:
         mgr.stop()
-    assert calls == ["stop", "pause"]
+    assert calls == ["pause", "stop", "resume"]
 
 
 def test_stop_unregisters_all_hotkeys(fake_win32) -> None:

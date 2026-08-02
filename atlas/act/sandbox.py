@@ -20,7 +20,7 @@ import win32con
 import win32gui
 import win32process
 
-from atlas.core.logging import logger
+from atlas.core.logging import focus_logger, logger
 
 
 class SandboxState(Enum):
@@ -138,6 +138,7 @@ class ExecutionSandbox:
                 self._state = SandboxState.PAUSED
         if reason and reason != self._last_warning:
             logger.warning("sandbox PAUSED: {}", reason)
+            focus_logger.warning("sandbox PAUSED: {}", reason)
             self._last_warning = reason
 
     def set_reattaching(self) -> None:
@@ -163,6 +164,7 @@ class ExecutionSandbox:
                 self._focus_lost_count = 0
                 self._last_warning = None
                 logger.info("sandbox resumed")
+                focus_logger.info("sandbox resumed")
 
     @property
     def is_paused(self) -> bool:
@@ -201,43 +203,63 @@ class ExecutionSandbox:
         except Exception:
             return False
 
+    def _point_in_client_rect(self, x: int, y: int, target: TargetInfo) -> bool:
+        """True if (x, y) falls inside the target's absolute client rect."""
+        if not target.client_rect:
+            return False
+        left, top, right, bottom = target.client_rect
+        if right <= left or bottom <= top:
+            return False
+        return left <= x <= right and top <= y <= bottom
+
     def validate_click(self, x: int, y: int) -> tuple[bool, str]:
         """Validate that a click at (x,y) is inside the target application.
-        
-        For Electron/Chrome apps (pid=0), only verifies the app is in foreground.
-        For other apps, checks window hierarchy. Never blocks clicks within
-        the application window.
+
+        (x, y) are absolute screen coordinates. For Electron/Chrome apps
+        (pid=0) the window hierarchy cannot be trusted, so clicks are confined
+        to the target's client rect. For other apps the window hierarchy is
+        checked first, with the client rect as a final bound. Clicks outside
+        the target are always rejected.
         """
         if not self._config.check_mouse:
             return True, "mouse check disabled"
         target = self.validate_target()
         if target is None:
             return False, "no target attached"
-        
-        # For Electron/Chrome apps, trust the focus check and allow clicks
-        # The foreground check in validate_keyboard ensures MPF is active
+
         if target.pid == 0:
-            return True, "ok (Electron wrapper, pid=0)"
-        
-        # For other apps: verify window hierarchy
+            # Electron/Chrome wrapper: window hierarchy is unreliable, so bound
+            # clicks to the recorded client rect (absolute screen coordinates).
+            if target.client_rect and self._point_in_client_rect(x, y, target):
+                return True, "ok (inside client rect)"
+            return False, "click outside target client rect"
+
         try:
             hwnd = win32gui.WindowFromPoint((x, y))
             if hwnd:
                 clicked_root = win32gui.GetAncestor(hwnd, win32con.GA_ROOT)
                 if clicked_root == target.handle:
                     return True, "ok (same root window)"
-                
+
                 parent = win32gui.GetAncestor(hwnd, win32con.GA_PARENT)
                 if parent == target.handle:
                     return True, "ok (child of target)"
-                
+
                 _, pid = win32process.GetWindowThreadProcessId(hwnd)
                 if pid == target.pid and pid > 0:
                     return True, "ok (pid match)"
+
+                # A window resolved at this point that is not part of the target
+                # hierarchy (e.g. a foreign overlay/popup) would steal the click.
+                return False, "click on foreign window"
         except Exception:
             pass
-        
-        return True, "ok"
+
+        # No window resolved at the point: fall back to the client-rect bound
+        # so clicks never escape the recorded target area.
+        if target.client_rect and self._point_in_client_rect(x, y, target):
+            return True, "ok (inside client rect)"
+        return False, "click outside target window"
 
     def validate_keyboard(self) -> tuple[bool, str]:
         """Validate that keyboard input will go to the target application."""
@@ -336,15 +358,19 @@ class ExecutionSandbox:
                 if self._state == SandboxState.READY:
                     self._state = SandboxState.RUNNING
             return
-        
+
         try:
             fg = win32gui.GetForegroundWindow()
             with self._lock:
                 current_state = self._state
-            
+
             # Check if foreground window belongs to our target hierarchy.
             # For Electron apps the foreground HWND may differ from the wrapper.
             has_focus = self._window_belongs_to_target(fg, target)
+            focus_logger.debug(
+                "watchdog tick: fg={} target={} has_focus={} state={} lost={}",
+                fg, target.handle, has_focus, current_state.value, self.focus_lost_count,
+            )
             
             if not has_focus:
                 with self._lock:

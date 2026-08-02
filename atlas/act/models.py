@@ -27,6 +27,7 @@ class ActionType(str, Enum):
     PRESS_ENTER = "press_enter"
     PRESS_ESCAPE = "press_escape"
     PASTE = "paste"
+    UPLOAD_FILE = "upload_file"
     CTRL_A = "ctrl_a"
     WAIT = "wait"
     VERIFY = "verify"
@@ -118,6 +119,7 @@ VERIFYABLE_ACTIONS = {
     ActionType.CHOOSE_DATE,
     ActionType.CLEAR,
     ActionType.PASTE,
+    ActionType.UPLOAD_FILE,
 }
 
 
