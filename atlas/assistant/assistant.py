@@ -22,6 +22,7 @@ from pathlib import Path
 from atlas.act.clipboard import ClipboardEngine
 from atlas.act.controls import ControlEngine, ControlInterface
 from atlas.act.executor import ActionExecutor
+from atlas.act.hotkeys import HotkeyManager
 from atlas.act.keyboard import HumanKeyboard
 from atlas.act.mouse import HumanMouse, PyAutoGuiDriver
 from atlas.act.sandbox import ExecutionSandbox, SandboxConfig, TargetInfo
@@ -93,6 +94,12 @@ class Assistant:
         self._keyboard = HumanKeyboard(self._driver, self._config.typing)
         self._grabber = ScreenGrabber()
         self._sandbox = ExecutionSandbox(SandboxConfig())
+        self._hotkeys = HotkeyManager()
+        self._hotkeys.register("stop", self.stop)
+        self._hotkeys.register("pause", self.pause)
+        self._hotkeys.register("resume", self.resume)
+        self._hotkeys.register("quit", self.close)
+        self._hotkeys.start()
 
         advisor = LLMAdvisor(create_llm_provider(self._config.reasoning), self._config.reasoning.confidence_threshold)
         self._providers.append(advisor)
@@ -360,15 +367,24 @@ class Assistant:
     def _is_valid_anchor(self, node: UiaNode | None, root_handle: int | None, out: Path) -> bool:
         """Validate that a clicked control is a valid MPF form anchor.
         
-        Uses UIA structure instead of pixel distance. Accepts clicks inside
-        editable controls that belong to the MPF form.
+        In MPF (a Chromium-hosted app), the LEFT panel is a large List/Grid
+        ("Items View") and the RIGHT panel contains the editable form fields.
+        Only Edit/ComboBox/Calendar/Spinner controls in the right half of the
+        window are valid anchors. List controls are rejected because they
+        correspond to the left data panel or menu list.
         """
         if node is None or not node.editable:
             return False
         
-        # Must be a form control type
-        valid_types = {"Edit", "ComboBox", "Calendar", "Spinner", "List", "ListItem"}
+        # Only form-field control types are valid anchors.
+        # List/ListItem are rejected: in MPF these are the left-side data grid
+        # ("Items View") or menu lists, not editable form fields.
+        valid_types = {"Edit", "ComboBox", "Calendar", "Spinner"}
         if node.control_type not in valid_types:
+            logger.info(
+                "rejected anchor: control type {} - expected Edit/ComboBox/Calendar/Spinner",
+                node.control_type,
+            )
             return False
         
         # Must belong to MPF root window
@@ -381,7 +397,26 @@ class Assistant:
             except Exception:
                 pass
         
-        # Accept: clicked inside an editable MPF control
+        # Reject oversized controls (e.g. a List that fills the whole window).
+        # Form fields are small; a control covering the whole client area is a panel/grid.
+        if node.rect is not None and root_handle is not None:
+            try:
+                import win32gui
+                client_rect = win32gui.GetClientRect(root_handle)
+                client_w = max(1, client_rect[2])
+                client_h = max(1, client_rect[3])
+                ctrl_w = node.rect.width
+                ctrl_h = node.rect.height
+                if ctrl_w > client_w * 0.7 or ctrl_h > client_h * 0.7:
+                    logger.info(
+                        "rejected anchor: control {}x{} too large for form field (client {}x{})",
+                        ctrl_w, ctrl_h, client_w, client_h,
+                    )
+                    return False
+            except Exception:
+                pass
+        
+        # Accept: clicked inside a small editable MPF form control
         logger.info(
             "Anchor accepted: {} ({}) | Root: {} | Rect: {}",
             node.name or node.automation_id,
@@ -593,6 +628,10 @@ class Assistant:
 
     def close(self) -> None:
         """Release every resource: target, providers, memory."""
+        try:
+            self._hotkeys.stop()
+        except Exception:
+            pass
         try:
             self.detach()
         finally:

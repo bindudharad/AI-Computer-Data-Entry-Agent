@@ -253,14 +253,28 @@ class NoopOcrReader(OcrReader):
         return []
 
 
+_READER_CACHE: dict[tuple, OcrReader] = {}
+
+
 def create_ocr_reader(config: OcrConfig | None = None) -> OcrReader:
-    """Factory for the configured OCR fallback."""
+    """Factory for the configured OCR fallback.
+
+    Readers are cached per (engine, lang) so model weights load once per
+    process and are reused across captures.
+    """
     config = config or OcrConfig()
+    key = (config.engine, config.lang)
+    cached = _READER_CACHE.get(key)
+    if cached is not None:
+        return cached
     if config.engine == "paddle":
-        return PaddleOcrReader(config)
-    if config.engine == "tesseract":
-        return TesseractOcrReader(config)
-    return NoopOcrReader()
+        reader: OcrReader = PaddleOcrReader(config)
+    elif config.engine == "tesseract":
+        reader = TesseractOcrReader(config)
+    else:
+        reader = NoopOcrReader()
+    _READER_CACHE[key] = reader
+    return reader
 
 
 __all__ = ["OcrReader", "PaddleOcrReader", "TesseractOcrReader", "create_ocr_reader"]

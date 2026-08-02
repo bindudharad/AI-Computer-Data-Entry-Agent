@@ -155,7 +155,12 @@ class UiaFieldMapBuilder:
                 field = self._backend.scroll_into_view(field)
 
         text_nodes = self._backend.text_nodes(hwnd)
-        left_labels = [n for n in text_nodes if n.rect is not None and n.rect.center[0] < mid_x]
+        left_labels = [
+            n for n in text_nodes
+            if n.rect is not None
+            and n.rect.center[0] < mid_x
+            and _is_meaningful_label(n.name)
+        ]
 
         upload_button = self._pick_upload_button(self._backend.buttons(hwnd))
 
@@ -233,9 +238,15 @@ def pair_source_pairs(
 ) -> list[tuple[str, str]]:
     """Pair OCR text lines from the source panel into (label, value) pairs.
 
-    Prefers ``Label: value`` lines from OCR; UIA static labels then fill in any
-    labels that OCR did not pair (their values fall back to the OCR remainder
-    of the matching line, or an empty string).
+    Strategy, in priority order:
+
+    1. ``Label: value`` lines straight from OCR.
+    2. Geometric pairing of UIA text nodes: the source panel renders each
+       field as a label text node with its value as a sibling text node on the
+       same row, so a row of two nodes is paired left -> right. This is what
+       recovers real values even when OCR finds no colon lines.
+    3. UIA static labels fill in any labels still missing (value falls back to
+       the OCR remainder of the matching line, or an empty string).
     """
     pairs: dict[str, str] = {}
     ordered: list[str] = []
@@ -252,7 +263,31 @@ def pair_source_pairs(
                 pairs[label] = parts[1].strip()
                 ordered.append(label)
 
+    consumed: set[int] = set()
+    if uia_labels:
+        rows = _group_same_row([n for n in uia_labels if n.rect is not None])
+        for row in rows:
+            row.sort(key=lambda n: (n.rect.left if n.rect else 0, n.rect.top if n.rect else 0))
+            i = 0
+            while i < len(row) - 1:
+                left_node, right_node = row[i], row[i + 1]
+                gap = (right_node.rect.left - left_node.rect.right) if left_node.rect and right_node.rect else 0
+                label = _clean_label(left_node.name)
+                value = _clean_label(right_node.name)
+                # Wide nodes are section headers (e.g. "Member Basic
+                # Information"), not field labels; never pair them with a value.
+                left_wide = left_node.rect is not None and left_node.rect.width > 120
+                if label and value and label != value and label not in pairs and gap <= 170 and not left_wide:
+                    pairs[label] = value
+                    ordered.append(label)
+                    consumed.add(id(right_node))
+                    i += 2
+                    continue
+                i += 1
+
     for node in uia_labels or []:
+        if id(node) in consumed:
+            continue
         label = _clean_label(node.name)
         if not label or label in pairs:
             continue
@@ -265,6 +300,24 @@ def pair_source_pairs(
         ordered.append(label)
 
     return [(label, pairs[label]) for label in ordered]
+
+
+def _group_same_row(nodes: list[UiaNode], y_tolerance: int = 8) -> list[list[UiaNode]]:
+    """Group nodes whose vertical centres fall within ``y_tolerance`` px."""
+    rows: list[list[UiaNode]] = []
+    for node in sorted(nodes, key=lambda n: (n.rect.center[1], n.rect.center[0])):
+        if node.rect is None:
+            continue
+        placed = False
+        for row in rows:
+            row_y = sum(n.rect.center[1] for n in row) / len(row)
+            if abs(node.rect.center[1] - row_y) <= y_tolerance:
+                row.append(node)
+                placed = True
+                break
+        if not placed:
+            rows.append([node])
+    return rows
 
 
 def _build_name_mappings(left_labels: list[UiaNode], right_fields: list[UiaNode]) -> list[dict[str, str]]:
@@ -307,12 +360,15 @@ def build_hybrid_mappings(
     right_fields: list[UiaNode],
     client_origin: tuple[int, int] = (0, 0),
 ) -> list[dict[str, str]]:
-    """Hybrid (geometry-first, semantic-fallback) LEFT->RIGHT mapping.
+    """Hybrid (semantic-first, geometry-fallback) LEFT->RIGHT mapping.
 
-    For every left label with a bounding box, the nearest editable control on
-    its right is found using *relative* positions within the client area (same
-    row band preferred, then nearest horizontal distance). Labels that cannot
-    be placed geometrically fall back to the semantic similarity mapper.
+    The RIGHT form fields carry authoritative UIA names (e.g. "Full Name",
+    "Gender", "State"). The LEFT labels are OCR text that may be noisy
+    fragments. Therefore we map semantic-first: match each left label to the
+    right field whose UIA name is semantically closest (using aliases and
+    fuzzy matching). Geometry (same-row + nearest-right) is used only as a
+    tiebreaker when semantic scores are close, and as a fallback for labels
+    that have no semantic match.
 
     Never uses absolute screen coordinates - everything is relative to the
     client area origin, so the mapping holds regardless of where the window
@@ -324,40 +380,75 @@ def build_hybrid_mappings(
     semantic_inputs: list[UiaNode] = []
     semantic_pool: list[UiaNode] = []
 
-    for label in left_labels:
-        if label.rect is None or label.rect.width <= 0 or label.rect.height <= 0:
-            semantic_inputs.append(label)
-            continue
-        lx, ly = label.rect.left - ox, label.rect.top - oy
-        label_center_y = ly + label.rect.height / 2
+    # Build a semantic index of right fields: name + automation_id + aliases.
+    mapper = SemanticMapper()
+    right_index: list[tuple[str, UiaNode]] = []
+    for field in right_fields:
+        name = _clean_label(field.name)
+        auto_id = _clean_label(field.automation_id)
+        candidates = {n for n in (name, auto_id) if n}
+        for c in candidates:
+            right_index.append((c, field))
 
-        best: tuple[float, UiaNode] | None = None
-        for field in right_fields:
-            if field.rect is None or field.rect.width <= 0 or field.rect.height <= 0:
-                continue
-            fx, fy = field.rect.left - ox, field.rect.top - oy
-            if fx <= lx:
-                continue  # must be to the RIGHT of the label
+    for label in left_labels:
+        source = _clean_label(label.name)
+        if not source:
+            continue
+        # 1) Semantic match against right field names/automation ids.
+        best_sem: tuple[float, UiaNode] | None = None
+        for candidate, field in right_index:
             if id(field) in used:
                 continue
-            field_center_y = fy + field.rect.height / 2
-            row_gap = abs(field_center_y - label_center_y)
-            dist = fx - lx
-            # Prefer the same row; otherwise a small vertical gap is fine.
-            row_penalty = 0.0 if row_gap <= max(12, field.rect.height // 2) else row_gap / 100.0
-            score = dist + row_penalty
-            if best is None or score < best[0]:
-                best = (score, field)
+            canonical_source = mapper.aliases.resolve(source)
+            canonical_target = mapper.aliases.resolve(candidate)
+            if canonical_source and canonical_target and canonical_source == canonical_target:
+                best_sem = (0.99, field)
+                break
+            score = _fuzzy(source, candidate)
+            if best_sem is None or score > best_sem[0]:
+                best_sem = (score, field)
 
-        if best is None:
+        # 2) Geometry match (same-row + nearest-right) as a tiebreaker/fallback.
+        best_geo: tuple[float, UiaNode] | None = None
+        if label.rect is not None and label.rect.width > 0 and label.rect.height > 0:
+            lx, ly = label.rect.left - ox, label.rect.top - oy
+            label_center_y = ly + label.rect.height / 2
+            for field in right_fields:
+                if field.rect is None or field.rect.width <= 0 or field.rect.height <= 0:
+                    continue
+                if id(field) in used:
+                    continue
+                fx, fy = field.rect.left - ox, field.rect.top - oy
+                if fx <= lx:
+                    continue  # must be to the RIGHT of the label
+                field_center_y = fy + field.rect.height / 2
+                row_gap = abs(field_center_y - label_center_y)
+                dist = fx - lx
+                row_penalty = 0.0 if row_gap <= max(12, field.rect.height // 2) else row_gap / 100.0
+                score = dist + row_penalty
+                if best_geo is None or score < best_geo[0]:
+                    best_geo = (score, field)
+
+        # Decide: prefer semantic if it's strong; otherwise use geometry.
+        chosen: tuple[float, UiaNode, str] | None = None
+        if best_sem is not None and best_sem[0] >= 0.55:
+            chosen = (best_sem[0], best_sem[1], "semantic")
+        elif best_geo is not None:
+            chosen = (0.82, best_geo[1], "geometry")
+
+        if chosen is None:
             semantic_inputs.append(label)
             continue
-        _, field = best
+        conf, field, method = chosen
         used.add(id(field))
-        source = _clean_label(label.name)
         target = _clean_label(field.name) or field.automation_id or ""
         if source and target:
-            mappings.append({"source": source, "target": target, "confidence": 0.82, "method": "geometry"})
+            mappings.append({
+                "source": source,
+                "target": target,
+                "confidence": round(conf, 3),
+                "method": method,
+            })
         else:
             semantic_inputs.append(label)
 
@@ -392,6 +483,35 @@ def _parse_element_type(name: Any) -> ElementType | None:
 def _clean_label(text: str) -> str:
     text = re.sub(r"[:：\s]+$", "", (text or "")).strip()
     return text
+
+
+def _is_meaningful_label(text: str) -> bool:
+    """Filter out OCR noise fragments (single letters, short fragments, etc.)."""
+    label = _clean_label(text)
+    if not label:
+        return False
+    # Reject very short fragments (1-2 chars) that are OCR noise.
+    if len(label) < 3:
+        return False
+    # Reject fragments that are just a single letter repeated or punctuation.
+    if re.fullmatch(r"[^a-zA-Z0-9]+", label):
+        return False
+    # Reject fragments that are just a single character repeated (e.g. "aaaa").
+    if len(set(label.lower())) == 1:
+        return False
+    # Reject fragments that are clearly OCR noise like "ile", "ecord", "ools".
+    # These are substrings of real words - require at least 2 words or a
+    # recognizable word pattern.
+    if re.fullmatch(r"[a-z]{2,4}", label.lower()) and not re.search(r"\s", label):
+        # Short lowercase-only fragments are likely OCR noise unless they're
+        # known field names.
+        known_short = {
+            "dob", "pan", "mbi", "rai", "mp", "f", "r", "t", "h",
+            "app", "age", "sex", "city", "state", "name", "bank",
+        }
+        if label.lower() not in known_short:
+            return False
+    return True
 
 
 def _union_rect(boxes: list[BBox]) -> BBox | None:

@@ -86,6 +86,49 @@ def test_pair_source_pairs_uia_labels_fill_in() -> None:
     assert "Full Name" in pairs  # known label from UIA, no OCR value
 
 
+def test_pair_source_pairs_geometric_two_column() -> None:
+    """A row of two sibling UIA text nodes pairs label -> value.
+
+    Mirrors the real MPF left panel where each field's label and value are
+    separate text controls on the same row (no OCR colon line).
+    """
+    labels = [
+        UiaNode(name="App No", control_type="Text", rect=BBox(539, 334, 41, 14)),
+        UiaNode(name="55096808", control_type="Text", rect=BBox(637, 334, 51, 14)),
+        UiaNode(name="Full Name", control_type="Text", rect=BBox(539, 366, 54, 15)),
+        UiaNode(name="RAJESH KUMAR", control_type="Text", rect=BBox(637, 366, 97, 15)),
+    ]
+    pairs = dict(pair_source_pairs([], labels))
+    assert pairs["App No"] == "55096808"
+    assert pairs["Full Name"] == "RAJESH KUMAR"
+
+
+def test_pair_source_pairs_geometric_skips_wide_header() -> None:
+    """Section headers and cross-column duplicate labels must not pair."""
+    labels = [
+        UiaNode(name="Member Basic Information", control_type="Text", rect=BBox(539, 315, 253, 16)),
+        UiaNode(name="App No", control_type="Text", rect=BBox(539, 334, 41, 14)),
+        UiaNode(name="55096808", control_type="Text", rect=BBox(637, 334, 51, 14)),
+        # duplicate label from the second column - different row, no value
+        UiaNode(name="App No", control_type="Text", rect=BBox(841, 344, 45, 16)),
+    ]
+    pairs = dict(pair_source_pairs([], labels))
+    assert pairs["App No"] == "55096808"
+    assert pairs["Member Basic Information"] == ""
+
+
+def test_pair_source_pairs_geometric_wide_header_not_paired_as_label() -> None:
+    """A wide header next to a duplicate label on the same row must not pair
+    the header with the duplicate as if it were its value."""
+    labels = [
+        UiaNode(name="Religious and Astro Information", control_type="Text", rect=BBox(539, 524, 253, 16)),
+        UiaNode(name="State", control_type="Text", rect=BBox(841, 525, 41, 15)),
+    ]
+    pairs = dict(pair_source_pairs([], labels))
+    assert pairs["Religious and Astro Information"] == ""
+    assert pairs["State"] == ""
+
+
 # ---------------------------------------------------------------------------
 # Field map serialization
 # ---------------------------------------------------------------------------
