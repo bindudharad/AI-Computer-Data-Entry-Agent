@@ -115,6 +115,9 @@ class ActionPlanner:
                         reason=f"verify '{mapping.source_label}'",
                     ))
             elif field_type in {ElementType.COMBOBOX, ElementType.LISTBOX}:
+                if not value:
+                    logger.debug("no value for combobox '{}' - skipping dropdown action", mapping.source_label)
+                    continue
                 actions.append(Action(
                     type=ActionType.CLICK,
                     field_id=target.element_id,

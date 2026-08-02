@@ -48,18 +48,73 @@ class ClientArea:
 
 
 class ScreenGrabber:
-    """Low-level screen grabber using mss."""
+    """Low-level screen grabber using mss, with a BitBlt fallback.
+
+    ``gdi32.GetDIBits() failed.`` errors are a known mss failure mode: once the
+    mss instance's internal DC goes stale (display changes, GPU/driver reset,
+    prolonged capture) every subsequent grab fails and the agent stalls. We
+    re-initialise the mss session on failure and, if it keeps failing, switch to
+    a PIL ``ImageGrab`` BitBlt path for a cooldown window so the loop never
+    deadlocks on a broken grabber.
+    """
+
+    #: Consecutive failures that trigger the BitBlt fallback.
+    _FALLBACK_AFTER = 2
+
+    #: How long (seconds) to stay on the BitBlt fallback once engaged.
+    _FALLBACK_WINDOW = 30.0
 
     def __init__(self) -> None:
         if mss is None:
             raise RuntimeError("mss is required for screen capture")
         self._mss = mss.mss()
+        self._consecutive_failures = 0
+        self._fallback_until = 0.0
 
     def grab_rect(self, left: int, top: int, width: int, height: int) -> np.ndarray:
         """Grab a rectangle and return an RGB numpy array."""
+        if time.time() < self._fallback_until:
+            return self._grab_bitblt(left, top, width, height)
+        try:
+            image = self._grab_mss(left, top, width, height)
+        except Exception as exc:
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= self._FALLBACK_AFTER:
+                self._fallback_until = time.time() + self._FALLBACK_WINDOW
+                logger.warning(
+                    "mss grab failed {}x ({}): switching to BitBlt fallback", self._consecutive_failures, exc
+                )
+                return self._grab_bitblt(left, top, width, height)
+            logger.debug("mss grab failed ({}): re-initialising grabber: {}", self._consecutive_failures, exc)
+            self._reinit()
+            try:
+                image = self._grab_mss(left, top, width, height)
+            except Exception as retry_exc:
+                logger.warning("mss grab failed after reinit ({}): using BitBlt fallback", retry_exc)
+                return self._grab_bitblt(left, top, width, height)
+        self._consecutive_failures = 0
+        return image
+
+    def _grab_mss(self, left: int, top: int, width: int, height: int) -> np.ndarray:
         shot = self._mss.grab({"left": left, "top": top, "width": width, "height": height})
         arr = np.frombuffer(shot.raw, dtype=np.uint8).reshape(shot.height, shot.width, 4)
         return arr[:, :, :3][:, :, ::-1].copy()  # BGRA -> RGB
+
+    def _grab_bitblt(self, left: int, top: int, width: int, height: int) -> np.ndarray:
+        """BitBlt-based capture via PIL (different GDI path than mss)."""
+        from PIL import ImageGrab
+
+        if width <= 0 or height <= 0:
+            raise ValueError("grab region must be non-empty")
+        img = ImageGrab.grab(bbox=(left, top, left + width, top + height))
+        return np.asarray(img.convert("RGB"))
+
+    def _reinit(self) -> None:
+        try:
+            self._mss.close()
+        except Exception:
+            pass
+        self._mss = mss.mss()
 
     def close(self) -> None:
         try:

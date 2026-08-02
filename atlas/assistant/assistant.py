@@ -26,7 +26,7 @@ from atlas.act.hotkeys import HotkeyManager
 from atlas.act.keyboard import HumanKeyboard
 from atlas.act.mouse import HumanMouse, PyAutoGuiDriver
 from atlas.act.sandbox import ExecutionSandbox, SandboxConfig, TargetInfo
-from atlas.act.verify import ClipboardVerifier, CompositeVerifier, TargetFieldVerifier, VisionVerifier
+from atlas.act.verify import ClipboardVerifier, CompositeVerifier, TargetFieldVerifier, VisionVerifier, looks_like_whole_window
 from atlas.config import AppConfig, load_config
 from atlas.core.events import EventType, get_event_bus
 from atlas.core.logging import logger
@@ -666,12 +666,20 @@ class Assistant:
         vision = VisionVerifier(self._read_region_ocr)
 
         def _desktop_read(field_id: str) -> str | None:
-            return clipboard.read_focused()
+            text = clipboard.read_focused()
+            if looks_like_whole_window(text):
+                logger.debug("clipboard read-back is whole-window - skipping target read")
+                return None
+            return text
 
+        # Field-scoped OCR runs first: it reads ONLY the field region, so a
+        # match is real. Whole-window clipboard read-backs (Ctrl+A in a browser
+        # selects the whole page) are rejected so "contains expected" can never
+        # pass trivially because the value lives in the source panel.
         return CompositeVerifier([
+            vision,
             TargetFieldVerifier(_desktop_read),
             ClipboardVerifier(self._keyboard, clipboard),
-            vision,
         ])
 
     def _read_region_ocr(self, bbox: BBox) -> list[OcrText]:

@@ -141,6 +141,10 @@ class ControlEngine(ControlInterface):
         self, bbox: BBox | None, value: str, options: list[str] | None = None, field_id: str | None = None
     ) -> ControlOutcome:
         value_str = str(value or "").strip()
+        if not value_str:
+            # Empty selection: typing nothing + Enter on an open native
+            # dropdown just hangs (or mis-selects). Skip cleanly instead.
+            return ControlOutcome(ok=True, evidence=f"select skipped (empty value) for {field_id!r}")
         if options:
             idx = self._find_option_index(options, value_str)
             if idx is not None:

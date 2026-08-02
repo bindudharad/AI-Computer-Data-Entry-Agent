@@ -51,6 +51,25 @@ def normalize_for_compare(value: str) -> str:
     return re.sub(r"[\s_\-]+", " ", lowered).strip()
 
 
+def looks_like_whole_window(text: str) -> bool:
+    """Heuristic: is this clipboard read-back the whole window, not one field?
+
+    In Chromium/Electron targets Ctrl+A selects the entire page, so the
+    clipboard read-back contains far more than a single field's value (labels,
+    the source panel, the window title, ...). Field values are single, short
+    lines; whole-window grabs are multi-line and long. When a read-back looks
+    like a whole-window grab it must NOT be used to confirm a field, otherwise
+    "contains expected" passes trivially because the expected value already
+    exists somewhere in the page.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    if "\n" in stripped:
+        return True
+    return len(stripped) > 250
+
+
 def _file_match(actual: str, expected: str) -> bool:
     """Match file-upload read-backs against an expected path.
 
@@ -112,6 +131,8 @@ class ClipboardVerifier(FieldVerifier):
             actual = self._clipboard.read_focused()
         except Exception as exc:
             return False, f"clipboard read failed: {exc}"
+        if looks_like_whole_window(actual):
+            return False, f"clipboard read-back is whole-window (not field-scoped): {actual[:80]!r}..."
         return self._compare(actual, expected)
 
     @staticmethod
@@ -185,4 +206,4 @@ class CompositeVerifier:
         return False, " | ".join(failures)
 
 
-__all__ = ["FieldVerifier", "CompositeVerifier", "ClipboardVerifier", "VisionVerifier", "TargetFieldVerifier", "normalize_for_compare", "_file_match"]
+__all__ = ["FieldVerifier", "CompositeVerifier", "ClipboardVerifier", "VisionVerifier", "TargetFieldVerifier", "normalize_for_compare", "looks_like_whole_window", "_file_match"]
